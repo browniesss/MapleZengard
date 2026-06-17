@@ -71,6 +71,10 @@ script SkillStatLogic extends Logic
 				end
 			end
 		end
+		local equip = _EquipmentLogic:GetEquipStatMultipliers(ownerId)
+		if equip ~= nil and equip.extraActionChance ~= nil then
+			chance = chance + equip.extraActionChance
+		end
 		if chance <= 0.0 then
 			return false
 		end
@@ -79,6 +83,24 @@ script SkillStatLogic extends Logic
 			log("[SkillStat] extra action granted: " .. ownerId)
 		end
 		return granted
+	end
+
+	method number GetExtraActionDamageMul(string ownerId)
+		-- Shadow Partner style follow-up attacks intentionally deal reduced damage.
+		local mul = 1.0
+		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
+			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
+			if passive ~= nil and passive.kind == "PASSIVE" and passive.passiveType == "EXTRA_ACTION" then
+				if passive.extraActionDamageMul ~= nil and passive.extraActionDamageMul > 0 then
+					mul = math.min(mul, passive.extraActionDamageMul)
+				end
+			end
+		end
+		local equip = _EquipmentLogic:GetEquipStatMultipliers(ownerId)
+		if equip ~= nil and equip.extraActionDamageMul ~= nil and equip.extraActionDamageMul > 0 then
+			mul = math.min(mul, equip.extraActionDamageMul)
+		end
+		return mul
 	end
 
 end

@@ -16,6 +16,8 @@ script WaveLogic extends Logic
 
 	property boolean forcedBoss = false
 
+	property boolean overflowCheckPending = false
+
 	property string currentStageId = ""
 
 	property any stageConfig = nil
@@ -96,6 +98,7 @@ script WaveLogic extends Logic
 		self.IsZenAvailable = true
 		self.processingZen = false
 		self.forcedBoss = false
+		self.overflowCheckPending = false
 		self.cooldownLeft = 0
 		self.playerCells = {}
 		log("[WaveLogic] wave reset: " .. stageId)
@@ -147,10 +150,8 @@ script WaveLogic extends Logic
 		ev.spawnedCount = spawned
 		_ZengardGameLogic:SendGameEvent(ev)
 		if (not isBossZen) and self.MonsterCount >= cfg.failThreshold then
-			log("[WaveLogic] stage failed: monster_overflow count=" .. self.MonsterCount)
-			_ZengardGameLogic:NotifyStageFailed("monster_overflow")
-			self.processingZen = false
-			return
+			self.overflowCheckPending = true
+			log("[WaveLogic] monster overflow armed after zen: count=" .. self.MonsterCount)
 		end
 		_CombatLogic:ExecuteZenCombat(self.CurrentZen)
 		self.processingZen = false
@@ -355,6 +356,16 @@ script WaveLogic extends Logic
 		-- Param typed 'any': see OnMonsterKilled (build-order independence).
 		-- §1.2-9: resync MonsterCount after the combat sequence settles all kills.
 		self.MonsterCount = _MonsterLogic:GetAliveMonsterCount()
+		if self.overflowCheckPending then
+			self.overflowCheckPending = false
+			local cfg = self.stageConfig
+			if cfg ~= nil and self.MonsterCount >= cfg.failThreshold then
+				log("[WaveLogic] stage failed: monster_overflow after grace count=" .. self.MonsterCount)
+				_ZengardGameLogic:NotifyStageFailed("monster_overflow")
+			else
+				log("[WaveLogic] monster overflow cleared after grace count=" .. self.MonsterCount)
+			end
+		end
 	end
 
 	@ExecSpace("ServerOnly")

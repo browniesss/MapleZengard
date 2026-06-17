@@ -171,6 +171,8 @@ script EquipmentLogic extends Logic
 			targetAdd = 0,
 			expGainMul = 0,
 			lootDropAdd = 0,
+			extraActionChance = 0,
+			extraActionDamageMul = 0,
 		}
 	end
 

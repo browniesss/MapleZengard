@@ -89,4 +89,17 @@ script EnergyLogic extends Logic
 		log("[EnergyLogic] energy full refill by red meso: userId=" .. userId)
 	end
 
+	@ExecSpace("Server")
+	method void RequestCheatFullRefill()
+		-- Prototype cheat: wired to the lobby/shop affordance so external demos never stall on energy.
+		local userId = senderUserId
+		self:RefreshEnergy(userId)
+		local energyState = _PlayerDataLogic:GetEnergyState(userId)
+		energyState.amount = _BmBalance.ENERGY_MAX
+		energyState.lastRefillAt = _PlayerDataLogic:GetUtcNowSec()
+		_PlayerDataLogic:MarkMetaDirty(userId)
+		_PlayerDataLogic:QueuePush(userId)
+		log("[EnergyLogic] cheat full refill: userId=" .. userId)
+	end
+
 end

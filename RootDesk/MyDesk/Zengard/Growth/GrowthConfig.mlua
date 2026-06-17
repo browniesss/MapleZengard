@@ -9,9 +9,9 @@ script GrowthConfig extends Logic
 
 	property integer EXPANDED_SLOT_COUNT = 5
 
-	property integer ADV_EXPOSURE_THRESHOLD = 3
+	property integer ADV_EXPOSURE_THRESHOLD = 2
 
-	property integer MAX_JOB_TIER = 4
+	property integer MAX_JOB_TIER = 3
 
 	property integer CHOICE_EXPAND_LOOT_COST = 5
 
@@ -20,8 +20,11 @@ script GrowthConfig extends Logic
 	property integer FILLER_MESO_AMOUNT = 10
 
 	method integer GetExpToNext(integer level)
+		if level <= 1 then
+			return 2
+		end
 		-- MASTER_PLAN §7.5: EXP_TO_NEXT(L) = 4 + 2*(L-1), capped by LEVEL_CAP at the caller.
-		return 4 + 2 * (level - 1)
+		return 2 + 2 * (level - 1)
 	end
 
 	method integer GetEquipCardCap(integer slotCount)
@@ -34,7 +37,7 @@ script GrowthConfig extends Logic
 
 	method integer GetAdvanceCost(integer targetTier)
 		-- Loot cost per advancement target tier {2=3, 3=5, 4=8} — single definition (C-22).
-		local costs = { [2] = 3, [3] = 5, [4] = 8 }
+		local costs = { [2] = 0, [3] = 5 }
 		local cost = costs[targetTier]
 		if cost == nil then
 			return 0
@@ -47,9 +50,9 @@ script GrowthConfig extends Logic
 		-- Single source for which skill each branch unlocks; SkillChoiceLogic:IsTierEligible reads
 		-- the matching jobTier/advRoute on the SkillDataLogic records to gate the candidate roll.
 		return {
-			firepoison = { [2] = "mage_fire_arrow", [3] = "mage_meteor", [4] = "mage_poison_mist" },
-			icelightning = { [2] = "mage_thunder_bolt", [3] = "mage_chain_lightning", [4] = "mage_blizzard" },
-			bishop = { [2] = "mage_bless", [3] = "mage_heal", [4] = "mage_angel_ray" },
+			firepoison = { [2] = "mage_fire_arrow", [3] = "mage_explosion" },
+			icelightning = { [2] = "mage_thunder_bolt", [3] = "mage_ice_strike" },
+			bishop = { [2] = "mage_bless", [3] = "mage_holy_symbol" },
 		}
 	end
 
@@ -89,7 +92,7 @@ script GrowthConfig extends Logic
 			}
 			local branchName = byBranch[branch]
 			if branchName == nil then
-				return "마법사"
+				return tostring(tier) .. "차 마법사"
 			end
 			return branchName
 		end
@@ -116,6 +119,10 @@ script GrowthConfig extends Logic
 			eq_red_whip = { name = "붉은 채찍", desc = "공격 대상 수가 증가합니다." },
 			eq_old_maple_book = { name = "낡은 메이플 북", desc = "획득 경험치가 증가합니다." },
 			eq_lucky_charm = { name = "행운의 부적", desc = "전리품 획득 확률이 증가합니다." },
+			eq_shadow_partner_charm = { name = "쉐도우 파트너 계약", desc = "낮은 피해의 추가 행동을 더 자주 발동합니다." },
+			eq_sniper_scope = { name = "스나이퍼 스코프", desc = "사거리와 치명타 확률이 함께 증가합니다." },
+			eq_holy_symbol_totem = { name = "홀리 심볼 토템", desc = "경험치와 전리품 획득량을 끌어올립니다." },
+			eq_combo_core = { name = "콤보 코어", desc = "공격력과 스킬 피해량이 동시에 증가합니다." },
 		}
 		local display = displays[equipId]
 		if display == nil then

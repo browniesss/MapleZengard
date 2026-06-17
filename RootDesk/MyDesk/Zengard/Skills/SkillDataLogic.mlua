@@ -43,6 +43,7 @@ script SkillDataLogic extends Logic
 			if rec.linePierce == nil then rec.linePierce = false end
 			if rec.passiveType == nil then rec.passiveType = "" end
 			if rec.passiveValuePerLv == nil then rec.passiveValuePerLv = {} end
+			if rec.extraActionDamageMul == nil then rec.extraActionDamageMul = 0.0 end
 			if rec.critChanceBonus == nil then rec.critChanceBonus = 0.0 end
 			if rec.hits == nil then rec.hits = 0 end
 			if rec.range == nil then rec.range = 0 end
@@ -92,6 +93,70 @@ script SkillDataLogic extends Logic
 			shape = "RANGED_TARGET", range = 5, hits = 2, damagePerLv = { 2, 3, 4 }, critChanceBonus = 0.10,
 			desc = "표창 2개를 던지며 치명타 확률 +10%p",
 			iconRuid = "a49c086a08b14c19bb7b9ae483dff2cc" })
+
+		-- Tier-2 skills. Representative 2nd-job branches per base job, translated for the live cards.
+		addSkill({ skillId = "warrior_rage", displayName = "분노", job = "warrior", kind = "ACTIVE",
+			jobTier = 2, advRoute = "fighter", shape = "ADJACENT4", range = 1, hits = 2,
+			damagePerLv = { 3, 4, 6 },
+			desc = "주변 4칸의 적을 두 번 베어 전사의 난전을 강화합니다.",
+			iconRuid = "thumbnail://a7d36a70a3944508b71afad2945855f5" })
+		addSkill({ skillId = "warrior_hyper_body", displayName = "하이퍼 바디", job = "warrior", kind = "ACTIVE",
+			jobTier = 2, advRoute = "spearman", shape = "LINE", range = 4, hits = 1,
+			damagePerLv = { 5, 7, 10 }, linePierce = true, directional = true,
+			desc = "창의 기세를 직선 충격파로 바꿔 한 줄의 적을 관통합니다.",
+			iconRuid = "thumbnail://a7e1200a4036453f9725cd8792395a0a" })
+		addSkill({ skillId = "archer_arrow_bomb", displayName = "애로우 봄", job = "archer", kind = "ACTIVE",
+			jobTier = 2, advRoute = "hunter", shape = "ADJACENT8", range = 1, hits = 1,
+			damagePerLv = { 4, 6, 8 },
+			desc = "폭발 화살로 주변 8칸의 적을 한 번에 터뜨립니다.",
+			iconRuid = "thumbnail://90629b39611f4114847a8be888a0a80f" })
+		addSkill({ skillId = "archer_iron_arrow", displayName = "아이언 애로우", job = "archer", kind = "ACTIVE",
+			jobTier = 2, advRoute = "crossbowman", shape = "LINE", range = 7, hits = 1,
+			damagePerLv = { 5, 7, 10 }, linePierce = true, directional = true,
+			desc = "강철 화살을 발사해 선택한 방향의 적을 끝까지 관통합니다.",
+			iconRuid = "thumbnail://aedeee2241c2464abeb6d70bad441ec1" })
+		addSkill({ skillId = "thief_savage_blow", displayName = "새비지 블로우", job = "thief", kind = "ACTIVE",
+			jobTier = 2, advRoute = "bandit", shape = "RANGED_TARGET", range = 2, hits = 6,
+			damagePerLv = { 1, 2, 3 },
+			desc = "가까운 적 하나를 단검으로 여섯 번 빠르게 난도질합니다.",
+			iconRuid = "thumbnail://a7d36a70a3944508b71afad2945855f5" })
+		addSkill({ skillId = "thief_drain", displayName = "드레인", job = "thief", kind = "ACTIVE",
+			jobTier = 2, advRoute = "assassin", shape = "RANGED_TARGET", range = 5, hits = 1,
+			damagePerLv = { 5, 7, 10 }, critChanceBonus = 0.15,
+			desc = "멀리 있는 적을 흡수의 표창으로 공격하고 치명타 확률을 높입니다.",
+			iconRuid = "thumbnail://63af9dc845db4da2960172417b3eee5d" })
+
+		-- Tier-3 skills. These are not just stronger FX: each one changes targeting, hit count, or passives.
+		addSkill({ skillId = "warrior_combo_attack", displayName = "콤보 어택", job = "warrior", kind = "ACTIVE",
+			jobTier = 3, advRoute = "", shape = "ADJACENT4_SINGLE", range = 1, hits = 5,
+			damagePerLv = { 3, 4, 6 }, critChanceBonus = 0.10,
+			desc = "인접한 적 하나에게 콤보를 집중해 다섯 번 타격합니다.",
+			iconRuid = "754fc2f3e27d4917a3d3b1d9a599289d" })
+		addSkill({ skillId = "warrior_dragon_roar", displayName = "드래곤 로어", job = "warrior", kind = "ACTIVE",
+			jobTier = 3, advRoute = "", shape = "ADJACENT8", range = 1, hits = 2,
+			damagePerLv = { 5, 7, 10 },
+			desc = "용의 포효로 주변 8칸을 두 번 휩쓸어 밀집한 적에게 강합니다.",
+			iconRuid = "thumbnail://3caa4d96acd74517829aa166f10e8a28" })
+		addSkill({ skillId = "archer_strafe", displayName = "스트레이프", job = "archer", kind = "ACTIVE",
+			jobTier = 3, advRoute = "", shape = "RANGED_TARGET", range = 7, hits = 4,
+			damagePerLv = { 3, 4, 6 }, critChanceBonus = 0.10,
+			desc = "가장 가까운 적에게 네 발을 집중 사격합니다.",
+			iconRuid = "thumbnail://a7d36a70a3944508b71afad2945855f5" })
+		addSkill({ skillId = "archer_arrow_rain", displayName = "애로우 레인", job = "archer", kind = "ACTIVE",
+			jobTier = 3, advRoute = "", shape = "ADJACENT8", range = 1, hits = 2,
+			damagePerLv = { 4, 6, 8 },
+			desc = "화살비를 내려 주변 8칸의 적을 두 번 공격합니다.",
+			iconRuid = "thumbnail://90629b39611f4114847a8be888a0a80f" })
+		addSkill({ skillId = "thief_shadow_partner", displayName = "쉐도우 파트너", job = "thief", kind = "PASSIVE",
+			jobTier = 3, advRoute = "",
+			passiveType = "EXTRA_ACTION", passiveValuePerLv = { 0.35, 0.50, 0.65 }, extraActionDamageMul = 0.55,
+			desc = "분신을 장착해 낮은 피해의 추가 행동을 확률적으로 한 번 더 수행합니다.",
+			iconRuid = "thumbnail://cc7f34b0c45d49679a7b9ffcd71341ee" })
+		addSkill({ skillId = "thief_assaulter", displayName = "어썰터", job = "thief", kind = "ACTIVE",
+			jobTier = 3, advRoute = "", shape = "LINE", range = 5, hits = 3,
+			damagePerLv = { 3, 5, 7 }, linePierce = true, directional = true,
+			desc = "그림자 돌진으로 직선상의 적을 관통하며 세 번 베어냅니다.",
+			iconRuid = "thumbnail://c9b9b0a008754947a164ab68fdd2eabd" })
 
 		-- Passive skills (one per job).
 		addSkill({ skillId = "warrior_power_mastery", displayName = "워리어 마스터리", job = "warrior", kind = "PASSIVE",
@@ -146,23 +211,49 @@ script SkillDataLogic extends Logic
 			desc = "신성한 축복으로 고정 데미지를 +2씩 증가",
 			iconRuid = "1306d09353bb4fd1b203a0670c6a94e1" })
 
-		-- Mage tier-3/4 branch skills (advancement keeps the same firepoison/icelightning/bishop
-		-- route; each tier surfaces one new active per branch — design doc p.12). Gated by
-		-- GrowthLogic jobTier/branch through SkillChoiceLogic:IsTierEligible (jobTier + advRoute).
+		-- Mage tier-3 branch skills. Existing tier-4 style spells below stay gated above the prototype cap.
+		addSkill({ skillId = "mage_explosion", displayName = "익스플로전", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 2,
+			damagePerLv = { 4, 6, 9 }, element = "FIRE",
+			desc = "불독 마법으로 주변 8칸을 두 번 폭발시킵니다.",
+			iconRuid = "thumbnail://ca66b992cea9400eab7d6d202bcb7a60" })
+		addSkill({ skillId = "mage_ice_strike", displayName = "아이스 스트라이크", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "icelightning", shape = "ADJACENT8", range = 1, hits = 2,
+			damagePerLv = { 4, 6, 9 }, element = "ICE",
+			desc = "썬콜 마법으로 주변 8칸을 얼려 두 번 공격합니다.",
+			iconRuid = "thumbnail://ecb6ec9657854526b79bcaa3256a4c55" })
+		addSkill({ skillId = "mage_thunder_spear", displayName = "썬더 스피어", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "icelightning", shape = "RANGED_TARGET", range = 6, hits = 3,
+			damagePerLv = { 4, 6, 8 }, element = "LIGHTNING", critChanceBonus = 0.10,
+			desc = "번개의 창으로 멀리 있는 적 하나를 세 번 꿰뚫습니다.",
+			iconRuid = "thumbnail://df732e3d54da4d9bb5b97ca0f938b56f" })
+		addSkill({ skillId = "mage_holy_symbol", displayName = "홀리 심볼", job = "mage", kind = "PASSIVE",
+			jobTier = 3, advRoute = "bishop", element = "HOLY",
+			passiveType = "EXP_GAIN", passiveValuePerLv = { 0.15, 0.25, 0.35 },
+			desc = "성스러운 상징으로 획득 경험치를 크게 증가시킵니다.",
+			iconRuid = "thumbnail://dcb4c7f7039147e0ac88ac981e9fafc9" })
+		addSkill({ skillId = "mage_shining_ray", displayName = "샤이닝 레이", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "bishop", shape = "LINE", range = 6, hits = 2,
+			damagePerLv = { 4, 6, 8 }, element = "HOLY", linePierce = true, directional = true,
+			desc = "성스러운 빛줄기로 직선상의 적을 두 번 관통합니다.",
+			iconRuid = "thumbnail://786320718c6a4d06bdc3eec55fd0b7d9" })
+
+		-- Mage tier-4 style branch skills are retained for data compatibility but unreachable while
+		-- GrowthConfig.MAX_JOB_TIER is 3.
 		-- firepoison (불독)
 		addSkill({ skillId = "mage_meteor", displayName = "메테오", job = "mage", kind = "ACTIVE",
-			jobTier = 3, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 1,
+			jobTier = 4, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 1,
 			damagePerLv = { 6, 9, 12 }, element = "FIRE",
 			desc = "운석을 떨어뜨려 주위 8방의 적을 불태움",
 			iconRuid = "fe86d80277664393aaca4984b350bc29" })
 		addSkill({ skillId = "mage_poison_mist", displayName = "포이즌 미스트", job = "mage", kind = "ACTIVE",
-			jobTier = 4, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 2,
+			jobTier = 3, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 2,
 			damagePerLv = { 7, 10, 14 }, element = "POISON",
 			desc = "독안개로 주위 8방의 적을 2회 잠식",
 			iconRuid = "78031d46ae3847fbabd0de6ae43011dc" })
 		-- icelightning (썬콜)
 		addSkill({ skillId = "mage_chain_lightning", displayName = "체인 라이트닝", job = "mage", kind = "ACTIVE",
-			jobTier = 3, advRoute = "icelightning", shape = "LINE", range = 7, hits = 2,
+			jobTier = 4, advRoute = "icelightning", shape = "LINE", range = 7, hits = 2,
 			damagePerLv = { 5, 7, 10 }, element = "LIGHTNING", linePierce = true, directional = true,
 			desc = "직선으로 번개를 흘려 적을 2회 관통",
 			iconRuid = "7db0e2e559a1442bb297e6980820a0db" })
@@ -173,7 +264,7 @@ script SkillDataLogic extends Logic
 			iconRuid = "be84c1f93dd447da885431b27006a35d" })
 		-- bishop (비숍)
 		addSkill({ skillId = "mage_heal", displayName = "힐", job = "mage", kind = "ACTIVE",
-			jobTier = 3, advRoute = "bishop", shape = "RANGED_TARGET", range = 4, hits = 3,
+			jobTier = 4, advRoute = "bishop", shape = "RANGED_TARGET", range = 4, hits = 3,
 			damagePerLv = { 4, 6, 8 }, element = "HOLY",
 			desc = "원거리 대상에게 신성한 빛을 3회 시전",
 			iconRuid = "fd7e50112b9740018cbe75da3fe1479f" })

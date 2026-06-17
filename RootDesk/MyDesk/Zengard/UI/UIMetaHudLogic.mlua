@@ -59,7 +59,11 @@ script UIMetaHudLogic extends Logic
 		for i = 1, _BmBalance.ENERGY_MAX do
 			table.insert(self.energyCells, self.energyRow:GetChildByName("Cell" .. tostring(i), false))
 		end
-		self:WireButton(self.btnGrowth, function() _UIMetaGrowthPopupLogic:Open() end)
+		self:WireButton(self.btnGrowth, function()
+			_EnergyLogic:RequestCheatFullRefill()
+			_UIToastLogic:ShowMessage("테스트 치트: 에너지가 가득 찼습니다.")
+			_UIMetaGrowthPopupLogic:Open()
+		end)
 		log("[UIMetaHud] wired")
 		return true
 	end

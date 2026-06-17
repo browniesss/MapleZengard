@@ -176,6 +176,7 @@ script CompanionLogic extends Logic
 		end
 		self.companionSeq += 1
 		local companionId = "companion_" .. tostring(self.companionSeq)
+		local ownerUserId = self:ResolveOwnerUserId()
 
 		local col = nil
 		local row = nil
@@ -213,7 +214,7 @@ script CompanionLogic extends Logic
 
 		self.roster[companionId] = {
 			companionId = companionId,
-			ownerUserId = self:ResolveOwnerUserId(),
+			ownerUserId = ownerUserId,
 			jobGroup = jobGroup,
 			secondJob = secondJob,
 			direction = _CompanionConfig.DEFAULT_DIRECTION,

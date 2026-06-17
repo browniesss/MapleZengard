@@ -105,4 +105,25 @@ script CompanionConfig extends Logic
 		return equips[secondJob]
 	end
 
+	method table GetOutfitEquip(string secondJob)
+		-- Job-group longcoat for companions. These are the same render-verified outfits used by the lobby showcase.
+		local warrior = { longcoat = "397dd0fb804c44da94057818f94f68bf" }
+		local archer = { longcoat = "fdad20c644ec4371a5b0caa135baccf5" }
+		local mage = { longcoat = "b89184a243fc4047a3a858b7af8517ba" }
+		local thief = { longcoat = "28625b9456224bf69f66768a15e2d649" }
+		local equips = {
+			PAGE = warrior,
+			FIGHTER = warrior,
+			SPEARMAN = warrior,
+			HUNTER = archer,
+			CROSSBOWMAN = archer,
+			FP_WIZARD = mage,
+			IL_WIZARD = mage,
+			CLERIC = mage,
+			ASSASSIN = thief,
+			BANDIT = thief,
+		}
+		return equips[secondJob]
+	end
+
 end

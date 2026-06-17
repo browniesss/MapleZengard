@@ -141,11 +141,14 @@ script UIJobAdvancePopupLogic extends Logic
 	method string GetJobDisplayName(string jobKey, integer tier, string branch)
 		-- Display-only route names (§7.5 [P]/[D]); authoritative route data stays inside #4 GrowthConfig.
 		if jobKey == "mage" then
-			if tier <= 1 or branch == "" then
+			if tier <= 1 then
 				return "마법사"
 			end
+			if branch == "" then
+				return tostring(tier) .. "차 마법사"
+			end
 			local branchNames = { firepoison = "불독 마법사", icelightning = "썬콜 마법사", bishop = "비숍" }
-			return branchNames[branch] or "마법사"
+			return branchNames[branch] or (tostring(tier) .. "차 마법사")
 		end
 		local routes = {
 			warrior = { "검사", "파이터", "크루세이더", "히어로" },

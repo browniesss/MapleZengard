@@ -46,6 +46,8 @@ script GrowthLogic extends Logic
 			routeBranch = "",
 			choiceExposureCount = 0,
 			choiceSlotCount = _GrowthConfig.BASE_SLOT_COUNT,
+			forceSecondJobChoice = false,
+			forceAdvancedJobTier = 0,
 			pendingSets = {},
 			activeSet = nil,
 		}
@@ -66,6 +68,15 @@ script GrowthLogic extends Logic
 		local equipStats = _EquipmentLogic:GetEquipStatMultipliers(userId)
 		if equipStats ~= nil and equipStats.expGainMul ~= nil then
 			expGainMul = expGainMul + equipStats.expGainMul
+		end
+		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(userId)) do
+			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
+			if passive ~= nil and passive.kind == "PASSIVE" and passive.passiveType == "EXP_GAIN" then
+				local value = passive.passiveValuePerLv[entry.level]
+				if value ~= nil then
+					expGainMul = expGainMul + value
+				end
+			end
 		end
 		local metaStats = _MetaGrowthLogic:GetGrowthMultipliers(userId)
 		if metaStats ~= nil and metaStats.expGainMul ~= nil then
@@ -165,7 +176,7 @@ script GrowthLogic extends Logic
 		if state.activeSet.setType == "SPECIAL" then
 			-- Companion job cards have no redraw source; re-present the same set.
 			log_warning("[GrowthLogic] reroll on special choice set re-presented as-is user=" .. userId)
-			self:ShowChoiceSetRemote(state.activeSet.cards, state.activeSet.setId, _RerollLogic:GetRemainingRerolls(userId), userId)
+			self:ShowChoiceSetRemote(state.activeSet.cards, state.activeSet.setId, _RerollLogic:GetRemainingRerolls(userId), self:CanAdvanceNow(state), self:CanExpandNow(userId, state), userId)
 			return
 		end
 		state.activeSet = nil
@@ -203,11 +214,12 @@ script GrowthLogic extends Logic
 			if applied then
 				-- C-29: skillPoints is owned and decremented here on a confirmed skill pick.
 				state.skillPoints = math.max(0, state.skillPoints - 1)
-				if state.jobKey == "mage" and state.routeBranch == "" then
-					local lockedBranch = _GrowthConfig:GetMageBranchOfSkill(resolution.id)
+				if state.routeBranch == "" then
+					local lockedBranch = self:GetAdvanceRouteOfSkill(resolution.id)
 					if lockedBranch ~= "" then
 						state.routeBranch = lockedBranch
 						log("[GrowthLogic] RouteLocked(" .. lockedBranch .. ") user=" .. senderUserId)
+						self:NotifyJobRouteLocked(senderUserId, state)
 					end
 				end
 			else
@@ -223,10 +235,6 @@ script GrowthLogic extends Logic
 			self:GrantFillerReward(senderUserId)
 		elseif resolution.kind == "COMPANION_JOB" then
 			self:DispatchSpecialResolution(resolution.resolver, resolution.token, resolution.id)
-		end
-		if state.activeSet.countsExposure then
-			-- D18: only level-up sets count toward the advancement exposure threshold.
-			state.choiceExposureCount = state.choiceExposureCount + 1
 		end
 		state.activeSet = nil
 		log("[GrowthLogic] Pick(" .. resolvedKind .. "," .. resolvedId .. ") user=" .. senderUserId)
@@ -253,7 +261,7 @@ script GrowthLogic extends Logic
 		end
 		local targetTier = state.jobTier + 1
 		local cost = _GrowthConfig:GetAdvanceCost(targetTier)
-		if not _LootLogic:TrySpendLoot(senderUserId, cost, "job_adv") then
+		if cost > 0 and not _LootLogic:TrySpendLoot(senderUserId, cost, "job_adv") then
 			-- R10: advancement is deferred, state and skill points stay intact.
 			log("[GrowthLogic] AdvanceDeferred user=" .. senderUserId .. " cost=" .. cost)
 			self:NotifyAdvanceDeferred(senderUserId)
@@ -261,6 +269,12 @@ script GrowthLogic extends Logic
 		end
 		state.jobTier = targetTier
 		state.choiceExposureCount = 0
+		if targetTier == 2 then
+			state.forceSecondJobChoice = true
+		end
+		if targetTier >= 2 and targetTier <= _GrowthConfig.MAX_JOB_TIER then
+			state.forceAdvancedJobTier = targetTier
+		end
 		log("[GrowthLogic] JobAdvanced(" .. targetTier .. ") user=" .. senderUserId .. " branch=" .. state.routeBranch)
 		local ev = JobAdvancedEvent()
 		ev.userId = senderUserId
@@ -268,6 +282,25 @@ script GrowthLogic extends Logic
 		ev.newTier = targetTier
 		ev.branch = state.routeBranch
 		_ZengardGameLogic:SendGameEvent(ev)
+		if targetTier >= 2 and state.activeSet ~= nil then
+			state.activeSet = nil
+			self:ShowLevelUpChoiceSet(state)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void NotifyJobRouteLocked(string userId, table state)
+		-- Replays the advancement celebration with the branch name once the guaranteed tier-2 skill locks the mage route.
+		if state == nil or state.jobTier < 2 or state.routeBranch == "" then
+			return
+		end
+		local ev = JobAdvancedEvent()
+		ev.userId = userId
+		ev.jobKey = state.jobKey
+		ev.newTier = state.jobTier
+		ev.branch = state.routeBranch
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[GrowthLogic] JobRouteLockedEvent tier=" .. tostring(state.jobTier) .. " branch=" .. state.routeBranch .. " user=" .. userId)
 	end
 
 	@ExecSpace("Server")
@@ -279,10 +312,10 @@ script GrowthLogic extends Logic
 	end
 
 	@ExecSpace("Client")
-	method void ShowChoiceSetRemote(table cards, integer setId, integer rerollLeft)
+	method void ShowChoiceSetRemote(table cards, integer setId, integer rerollLeft, boolean canAdvance, boolean canExpand)
 		-- Bridges server card data into the client popup (C-2); cards carry setId for RequestPick.
 		log("[GrowthLogic] ShowChoiceSetRemote setId=" .. setId .. " cards=" .. #cards)
-		_UIChoicePopupLogic:ShowChoices(cards, rerollLeft, nil, nil)
+		_UIChoicePopupLogic:ShowChoices(cards, rerollLeft, canAdvance, canExpand)
 	end
 
 	@ExecSpace("Client")
@@ -374,6 +407,14 @@ script GrowthLogic extends Logic
 		local equipChance = _EquipmentLogic:GetEquipmentAppearChance(state.userId)
 		local equipCap = _GrowthConfig:GetEquipCardCap(slotCount)
 		local candidates = _SkillChoiceLogic:GetChoiceCandidates(state.userId, slotCount)
+		if state.forceAdvancedJobTier ~= nil and state.forceAdvancedJobTier >= 2 then
+			self:InjectAdvancedJobCandidate(state, candidates, state.forceAdvancedJobTier)
+			state.forceAdvancedJobTier = 0
+			state.forceSecondJobChoice = false
+		elseif state.forceSecondJobChoice then
+			self:InjectAdvancedJobCandidate(state, candidates, 2)
+			state.forceSecondJobChoice = false
+		end
 		local cards = {}
 		local resolutions = {}
 		local equipCount = 0
@@ -411,6 +452,53 @@ script GrowthLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method void InjectSecondJobCandidate(table state, table candidates)
+		self:InjectAdvancedJobCandidate(state, candidates, 2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void InjectAdvancedJobCandidate(table state, table candidates, integer targetTier)
+		local candidate = self:BuildAdvancedJobCandidate(state, targetTier)
+		if candidate == nil then
+			log_warning("[GrowthLogic] no advanced-job candidate available user=" .. state.userId .. " job=" .. state.jobKey .. " tier=" .. tostring(targetTier))
+			return
+		end
+		for i = #candidates, 1, -1 do
+			if candidates[i].skillId == candidate.skillId then
+				table.remove(candidates, i)
+			end
+		end
+		table.insert(candidates, 1, candidate)
+		log("[GrowthLogic] advanced-job candidate injected: " .. candidate.skillId .. " tier=" .. tostring(targetTier) .. " user=" .. state.userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildSecondJobCandidate(table state)
+		return self:BuildAdvancedJobCandidate(state, 2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildAdvancedJobCandidate(table state, integer targetTier)
+		local options = self:GetAdvancedJobGuaranteedSkills(state.jobKey, targetTier, state.routeBranch)
+		local available = {}
+		for _, skillId in ipairs(options) do
+			local data = _SkillDataLogic:GetSkillData(skillId)
+			if data ~= nil and _SkillChoiceLogic:IsTierEligible(state.userId, data) then
+				local level = _SkillInventoryLogic:GetSkillLevel(state.userId, skillId)
+				if level <= 0 and #_SkillInventoryLogic:GetOwnedSkills(state.userId) < _SkillDataLogic.MAX_OWNED_SKILLS then
+					table.insert(available, { skillId = skillId, kind = "NEW", ownerId = state.userId, ownerLabel = "" })
+				elseif level > 0 and level < _SkillDataLogic.SKILL_MAX_LEVEL then
+					table.insert(available, { skillId = skillId, kind = "LEVELUP", ownerId = state.userId, ownerLabel = "" })
+				end
+			end
+		end
+		if #available == 0 then
+			return nil
+		end
+		return available[_UtilLogic:RandomIntegerRange(1, #available)]
+	end
+
+	@ExecSpace("ServerOnly")
 	method void ShowSpecialChoiceSet(table state, table entry)
 		-- Special sets arrive pre-built in display form (§4.9 card schema).
 		local resolutions = {}
@@ -428,9 +516,108 @@ script GrowthLogic extends Logic
 		for _, card in ipairs(cards) do
 			card.setId = setId
 		end
+		if countsExposure then
+			state.choiceExposureCount = state.choiceExposureCount + 1
+		end
 		state.activeSet = { setId = setId, setType = setType, cards = cards, resolutions = resolutions, countsExposure = countsExposure }
-		log("[GrowthLogic] ChoiceOffered(" .. setId .. ", " .. #cards .. ") user=" .. state.userId)
-		self:ShowChoiceSetRemote(cards, setId, _RerollLogic:GetRemainingRerolls(state.userId), state.userId)
+		local canAdvance = self:CanAdvanceNow(state)
+		local canExpand = self:CanExpandNow(state.userId, state)
+		log("[GrowthLogic] ChoiceOffered(" .. setId .. ", " .. #cards .. ") user=" .. state.userId .. " exposure=" .. tostring(state.choiceExposureCount) .. " canAdvance=" .. tostring(canAdvance))
+		self:ShowChoiceSetRemote(cards, setId, _RerollLogic:GetRemainingRerolls(state.userId), canAdvance, canExpand, state.userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanAdvanceNow(table state)
+		if state == nil then
+			return false
+		end
+		if state.jobTier >= _GrowthConfig.MAX_JOB_TIER then
+			return false
+		end
+		return state.choiceExposureCount >= _GrowthConfig.ADV_EXPOSURE_THRESHOLD
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanExpandNow(string userId, table state)
+		if state == nil then
+			return false
+		end
+		if state.choiceSlotCount >= _GrowthConfig.EXPANDED_SLOT_COUNT then
+			return false
+		end
+		if _LootLogic:IsChoiceExpanded(userId) then
+			return false
+		end
+		return _LootLogic:GetLootCount(userId) >= _GrowthConfig.CHOICE_EXPAND_LOOT_COST
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetSecondJobGuaranteedSkills(string jobKey)
+		return self:GetAdvancedJobGuaranteedSkills(jobKey, 2, "")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetAdvancedJobGuaranteedSkills(string jobKey, integer targetTier, string branch)
+		local routes = {
+			warrior = {
+				[2] = { "warrior_rage", "warrior_hyper_body" },
+				[3] = { "warrior_combo_attack", "warrior_dragon_roar" },
+			},
+			archer = {
+				[2] = { "archer_arrow_bomb", "archer_iron_arrow" },
+				[3] = { "archer_strafe", "archer_arrow_rain" },
+			},
+			mage = {
+				[2] = { "mage_fire_arrow", "mage_thunder_bolt", "mage_bless" },
+				[3] = { "mage_explosion", "mage_ice_strike", "mage_holy_symbol" },
+			},
+			thief = {
+				[2] = { "thief_savage_blow", "thief_drain" },
+				[3] = { "thief_shadow_partner", "thief_assaulter" },
+			},
+		}
+		if jobKey == "mage" and targetTier == 3 and branch ~= nil and branch ~= "" then
+			local first = _GrowthConfig:GetMageBranchSkillId(branch, 3)
+			if branch == "firepoison" then
+				return { first, "mage_poison_mist" }
+			elseif branch == "icelightning" then
+				return { first, "mage_thunder_spear" }
+			elseif branch == "bishop" then
+				return { first, "mage_shining_ray" }
+			end
+		end
+		local byJob = routes[jobKey]
+		if byJob == nil then
+			return {}
+		end
+		local found = byJob[targetTier]
+		if found == nil then
+			return {}
+		end
+		return found
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetAdvanceRouteOfSkill(string skillId)
+		local routes = {
+			warrior_rage = "fighter",
+			warrior_hyper_body = "spearman",
+			archer_arrow_bomb = "hunter",
+			archer_iron_arrow = "crossbowman",
+			thief_savage_blow = "bandit",
+			thief_drain = "assassin",
+			warrior_combo_attack = "fighter",
+			warrior_dragon_roar = "spearman",
+			archer_strafe = "hunter",
+			archer_arrow_rain = "hunter",
+			thief_shadow_partner = "assassin",
+			thief_assaulter = "bandit",
+		}
+		local route = routes[skillId]
+		if route ~= nil then
+			return route
+		end
+		return _GrowthConfig:GetMageBranchOfSkill(skillId)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -441,7 +628,9 @@ script GrowthLogic extends Logic
 		local skillName = candidate.skillId
 		local iconRuid = ""
 		local effectDesc = ""
+		local skillTier = 1
 		if skillData ~= nil then
+			skillTier = skillData.jobTier or 1
 			if skillData.displayName ~= nil then
 				skillName = skillData.displayName
 			end
@@ -463,6 +652,14 @@ script GrowthLogic extends Logic
 			desc = "새로운 스킬을 배웁니다."
 		end
 		local grade = "NORMAL"
+		local flash = false
+		if skillTier >= 3 then
+			grade = "EPIC"
+			flash = true
+		elseif skillTier == 2 then
+			grade = "RARE"
+			flash = true
+		end
 		if candidate.kind == "LEVELUP" then
 			local curLevel = _SkillInventoryLogic:GetSkillLevel(ownerId, candidate.skillId)
 			desc = "Lv." .. curLevel .. "→Lv." .. (curLevel + 1) .. " 강화"
@@ -475,12 +672,13 @@ script GrowthLogic extends Logic
 				desc = desc .. " · " .. effectDesc
 			end
 			grade = "EPIC"
+			flash = true
 		end
 		if candidate.ownerLabel ~= nil and candidate.ownerLabel ~= "" then
 			-- Companion card: tag the name so the player can tell whose skill is growing.
 			skillName = "[동료 " .. candidate.ownerLabel .. "] " .. skillName
 		end
-		return { choiceId = candidate.skillId, kind = "SKILL", name = skillName, desc = desc, iconRuid = iconRuid, grade = grade }
+		return { choiceId = candidate.skillId, kind = "SKILL", name = skillName, desc = desc, iconRuid = iconRuid, grade = grade, flash = flash }
 	end
 
 	@ExecSpace("ServerOnly")

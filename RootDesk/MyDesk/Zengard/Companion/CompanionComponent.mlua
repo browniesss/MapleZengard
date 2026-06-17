@@ -23,24 +23,99 @@ script CompanionComponent extends Component
 		-- One-shot server setup: identity + costume. Costume slots are @Sync engine properties, so server writes reach every client.
 		self.CompanionId = companionId
 		self.SecondJob = secondJob
+		local ownerUserId = _CompanionLogic:ResolveOwnerUserId()
 		local costume = self.Entity.CostumeManagerComponent
 		if isvalid(costume) then
-			costume.UseCustomEquipOnly = true
-			local weapon = _CompanionConfig:GetWeaponEquip(secondJob)
-			if weapon ~= nil and weapon.ruid ~= "" then
-				if weapon.slot == "ONE_HANDED" then
-					costume.CustomOneHandedWeaponEquip = weapon.ruid
-				elseif weapon.slot == "TWO_HANDED" then
-					costume.CustomTwoHandedWeaponEquip = weapon.ruid
-				end
+			local copiedIdentity = self:ApplyOwnerIdentity(costume, ownerUserId)
+			if copiedIdentity then
+				costume.UseCustomEquipOnly = true
 			else
-				-- E10 fallback: default avatar without a weapon until the RUID is filled in.
-				log_warning("[CompanionComponent] weapon RUID missing for " .. secondJob)
+				-- If the account avatar has not composited on the server yet, clone it as a fallback so the companion is not nude.
+				costume.DefaultEquipUserId = ownerUserId
+				costume.UseCustomEquipOnly = false
 			end
+			self:ApplyJobOutfit(costume, secondJob)
+			self:ApplyJobWeapon(costume, secondJob)
+			log("[CompanionComponent] costume applied: " .. companionId .. " owner=" .. ownerUserId .. " customIdentity=" .. tostring(copiedIdentity))
 		else
 			log_warning("[CompanionComponent] CostumeManagerComponent missing on " .. companionId)
 		end
 		log("[CompanionComponent] setup: " .. companionId .. " (" .. secondJob .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method string SafeOwnerEquip(string ownerUserId, any category)
+		-- Reads an equipped avataritem RUID from the run owner and normalizes nil to an empty slot.
+		if ownerUserId == nil or ownerUserId == "" then
+			return ""
+		end
+		local ownerEntity = _UserService:GetUserEntityByUserId(ownerUserId)
+		if not isvalid(ownerEntity) then
+			return ""
+		end
+		local ownerCostume = ownerEntity.CostumeManagerComponent
+		if not isvalid(ownerCostume) then
+			return ""
+		end
+		local ruid = ownerCostume:GetEquip(category)
+		if ruid == nil then
+			return ""
+		end
+		return ruid
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ApplyOwnerIdentity(any costume, string ownerUserId)
+		-- Copies the owner avatar identity into custom slots so UseCustomEquipOnly still renders body, hair, and face.
+		local body = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Body)
+		if body == "" then
+			return false
+		end
+		costume.DefaultEquipUserId = ownerUserId
+		costume.CustomBodyEquip = body
+		costume.CustomHairEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Hair)
+		costume.CustomFaceEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Face)
+		costume.CustomEarEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Ear)
+		costume.CustomCapEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Cap)
+		costume.CustomCapeEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Cape)
+		costume.CustomGloveEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Glove)
+		costume.CustomShoesEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.Shoes)
+		costume.CustomFaceAccessoryEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.FaceAccessory)
+		costume.CustomEyeAccessoryEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.EyeAccessory)
+		costume.CustomEarAccessoryEquip = self:SafeOwnerEquip(ownerUserId, MapleAvatarItemCategory.EarAccessory)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyJobOutfit(any costume, string secondJob)
+		-- Dresses the companion in a class outfit while leaving body identity slots intact.
+		costume.CustomCoatEquip = ""
+		costume.CustomPantsEquip = ""
+		local outfit = _CompanionConfig:GetOutfitEquip(secondJob)
+		if outfit ~= nil and outfit.longcoat ~= nil and outfit.longcoat ~= "" then
+			costume.CustomLongcoatEquip = outfit.longcoat
+		else
+			log_warning("[CompanionComponent] outfit RUID missing for " .. secondJob)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyJobWeapon(any costume, string secondJob)
+		-- Equips the second-job weapon and clears mutually-exclusive weapon slots first.
+		costume.CustomOneHandedWeaponEquip = ""
+		costume.CustomTwoHandedWeaponEquip = ""
+		costume.CustomSubWeaponEquip = ""
+		local weapon = _CompanionConfig:GetWeaponEquip(secondJob)
+		if weapon ~= nil and weapon.ruid ~= "" then
+			if weapon.slot == "ONE_HANDED" then
+				costume.CustomOneHandedWeaponEquip = weapon.ruid
+			elseif weapon.slot == "TWO_HANDED" then
+				costume.CustomTwoHandedWeaponEquip = weapon.ruid
+			end
+		else
+			-- E10 fallback: default avatar without a weapon until the RUID is filled in.
+			log_warning("[CompanionComponent] weapon RUID missing for " .. secondJob)
+		end
 	end
 
 	@ExecSpace("ServerOnly")

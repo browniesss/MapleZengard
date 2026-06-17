@@ -45,6 +45,12 @@ script UIChoicePopupLogic extends Logic
 
 	property any advanceOverride = nil
 
+	property boolean advanceReady = false
+
+	property number advanceBlinkTime = 0
+
+	property number cardRefreshFxTime = 0
+
 	-- Advisory: the local player requested an expansion this run (server applies it to the NEXT
 	-- set). Keeps the expand button from re-enabling on the open popup after a successful spend.
 	property boolean expandRequestedRun = false
@@ -83,6 +89,8 @@ script UIChoicePopupLogic extends Logic
 				self.wired = true
 			end
 		end
+		self:UpdateAdvanceButtonFx(dt)
+		self:UpdateCardRefreshFx(dt)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -135,6 +143,8 @@ script UIChoicePopupLogic extends Logic
 		-- canAdvance/canExpand are optional server affordance flags; nil = derive client-side
 		-- (existing two-arg callers keep working — the extra args arrive as nil).
 		self.advanceOverride = canAdvance
+		self.advanceReady = canAdvance == true
+		self.advanceBlinkTime = 0
 		if self.cardEntities == nil then
 			self.cardEntities = { self.card1, self.card2, self.card3, self.card4, self.card5 }
 		end
@@ -168,8 +178,10 @@ script UIChoicePopupLogic extends Logic
 			end
 		end
 		self.currentSlotCount = count
+		self.cardRefreshFxTime = self:ShouldPlayRefreshFx(cards) and 0.75 or 0
 		self:UpdateRerollLabel(rerollLeft)
 		self:RefreshAffordances(canExpand)
+		self:UpdateAdvanceButtonFx(0)
 		-- Occlusion is reference-counted by the router; only increment on the closed->open transition so
 		-- a back-to-back re-present (two card sets without an intervening close) can't leave a depth the
 		-- single CloseChoices never repays.
@@ -184,6 +196,16 @@ script UIChoicePopupLogic extends Logic
 			_UIRouterLogic:ApplyModalHudOcclusion(true)
 		end
 		log("[UIChoicePopupLogic] show choices: setId=" .. self.currentSetId .. " cards=" .. count .. " rerollLeft=" .. rerollLeft)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean ShouldPlayRefreshFx(table cards)
+		for _, card in ipairs(cards) do
+			if card.flash == true or card.grade == "EPIC" then
+				return true
+			end
+		end
+		return false
 	end
 
 	@ExecSpace("ClientOnly")
@@ -224,8 +246,7 @@ script UIChoicePopupLogic extends Logic
 		end
 		local fx = cardEntity:GetChildByName("Fx", false)
 		if isvalid(fx) then
-			-- D7: only EPIC cards run the BurstNova particle.
-			fx.Enable = grade == "EPIC"
+			fx.Enable = grade == "EPIC" or card.flash == true
 		end
 	end
 
@@ -273,7 +294,60 @@ script UIChoicePopupLogic extends Logic
 			if self.advanceOverride ~= nil then
 				canAdvance = self.advanceOverride
 			end
+			self.advanceReady = canAdvance
 			self.btnJobAdv.ButtonComponent.Enable = canAdvance
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateAdvanceButtonFx(number dt)
+		if not self.isOpen or not isvalid(self.btnJobAdv) then
+			return
+		end
+		local bgColor = Color.FromHexCode("#334155")
+		local textColor = Color.FromHexCode("#CBD5E1")
+		if self.advanceReady then
+			self.advanceBlinkTime = self.advanceBlinkTime + dt
+			local pulse = (math.sin(self.advanceBlinkTime * 10.0) + 1.0) * 0.5
+			if pulse > 0.5 then
+				bgColor = Color.FromHexCode("#FFE066")
+			else
+				bgColor = Color.FromHexCode("#F97316")
+			end
+			textColor = Color.FromHexCode("#111827")
+		end
+		if isvalid(self.btnJobAdv.SpriteGUIRendererComponent) then
+			self.btnJobAdv.SpriteGUIRendererComponent.Color = bgColor
+		end
+		if isvalid(self.btnJobAdv.TextComponent) then
+			self.btnJobAdv.TextComponent.FontColor = textColor
+		end
+		if isvalid(self.btnJobAdv.UITransformComponent) then
+			local scale = 1.0
+			if self.advanceReady then
+				scale = 1.0 + 0.055 * ((math.sin(self.advanceBlinkTime * 10.0) + 1.0) * 0.5)
+			end
+			self.btnJobAdv.UITransformComponent.UIScale = Vector3(scale, scale, 1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateCardRefreshFx(number dt)
+		if self.cardRefreshFxTime <= 0 then
+			return
+		end
+		self.cardRefreshFxTime = self.cardRefreshFxTime - dt
+		local enabled = self.cardRefreshFxTime > 0
+		if self.cardEntities == nil then
+			return
+		end
+		for _, cardEntity in ipairs(self.cardEntities) do
+			if isvalid(cardEntity) and cardEntity.Enable then
+				local fx = cardEntity:GetChildByName("Fx", false)
+				if isvalid(fx) then
+					fx.Enable = enabled
+				end
+			end
 		end
 	end
 

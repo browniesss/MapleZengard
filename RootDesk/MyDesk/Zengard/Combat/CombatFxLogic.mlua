@@ -49,6 +49,14 @@ script CombatFxLogic extends Logic
 			return "dad03b3a528348bf98295b01edd621a4"
 		elseif fxKey == "warrior_slash_blast" then
 			return "3ebd5d6967394c2589408f69c2bc5c54"
+		elseif fxKey == "warrior_rage" then
+			return "4987142bef4b484298eb29c6f64b2f1e"
+		elseif fxKey == "warrior_hyper_body" then
+			return "3ebd5d6967394c2589408f69c2bc5c54"
+		elseif fxKey == "warrior_combo_attack" then
+			return "3cbc64d1f8564aeaa7585dc2e4699b3b"
+		elseif fxKey == "warrior_dragon_roar" then
+			return "3caa4d96acd74517829aa166f10e8a28"
 		elseif fxKey == "warrior_power_blast" then
 			return "4987142bef4b484298eb29c6f64b2f1e"
 		-- Archer
@@ -58,6 +66,14 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "archer_double_shot" then
 			-- Double Shot fires the same arrows; reuse the Arrow Blow ball clip.
 			return "64f775829e234918bd65e9d22214bb06"
+		elseif fxKey == "archer_arrow_bomb" then
+			return "64f775829e234918bd65e9d22214bb06"
+		elseif fxKey == "archer_iron_arrow" then
+			return "64f775829e234918bd65e9d22214bb06"
+		elseif fxKey == "archer_strafe" then
+			return "64f775829e234918bd65e9d22214bb06"
+		elseif fxKey == "archer_arrow_rain" then
+			return "90629b39611f4114847a8be888a0a80f"
 		elseif fxKey == "archer_ice_shot" then
 			return "b40d0b0bdce54010bfd3658e8549e073"
 		elseif fxKey == "archer_double_ice_shot" then
@@ -77,6 +93,16 @@ script CombatFxLogic extends Logic
 			return "ca66b992cea9400eab7d6d202bcb7a60"
 		elseif fxKey == "mage_thunder_bolt" then
 			return "df732e3d54da4d9bb5b97ca0f938b56f"
+		elseif fxKey == "mage_explosion" then
+			return "ca66b992cea9400eab7d6d202bcb7a60"
+		elseif fxKey == "mage_ice_strike" then
+			return "96b261657b0c4aa792bd6f3e7d6c6681"
+		elseif fxKey == "mage_thunder_spear" then
+			return "df732e3d54da4d9bb5b97ca0f938b56f"
+		elseif fxKey == "mage_holy_symbol" then
+			return "93f3cd96f3b1432693e5d2765d396338"
+		elseif fxKey == "mage_shining_ray" then
+			return "e86eef7f960146fea646300653347c2e"
 		elseif fxKey == "mage_meteor" then
 			return "9dadb8bef6954b6f9bcff0d2a581a938"
 		elseif fxKey == "mage_poison_mist" then
@@ -92,8 +118,16 @@ script CombatFxLogic extends Logic
 		-- Thief
 		elseif fxKey == "thief_double_stab" then
 			return "c13c85382144469daf33bf2c9bae7e5e"
+		elseif fxKey == "thief_savage_blow" then
+			return "c13c85382144469daf33bf2c9bae7e5e"
 		elseif fxKey == "thief_lucky_seven" then
 			return "458e72f0720a4584a9a7fc3642b6e601"
+		elseif fxKey == "thief_drain" then
+			return "63af9dc845db4da2960172417b3eee5d"
+		elseif fxKey == "thief_shadow_partner" then
+			return "cc7f34b0c45d49679a7b9ffcd71341ee"
+		elseif fxKey == "thief_assaulter" then
+			return "c13c85382144469daf33bf2c9bae7e5e"
 		elseif fxKey == "thief_triple_seven" then
 			return "63af9dc845db4da2960172417b3eee5d"
 		end
@@ -114,9 +148,17 @@ script CombatFxLogic extends Logic
 		local scaleByFxKey = {
 			["warrior_power_strike"] = 0.85,
 			["warrior_slash_blast"] = 0.85,
+			["warrior_rage"] = 0.65,
+			["warrior_hyper_body"] = 0.85,
+			["warrior_combo_attack"] = 0.75,
+			["warrior_dragon_roar"] = 0.7,
 			["warrior_power_blast"] = 0.6,
 			["archer_arrow_blow"] = 1.3,
 			["archer_double_shot"] = 1.3,
+			["archer_arrow_bomb"] = 1.55,
+			["archer_iron_arrow"] = 1.35,
+			["archer_strafe"] = 1.3,
+			["archer_arrow_rain"] = 1.2,
 			["archer_ice_shot"] = 0.65,
 			["archer_double_ice_shot"] = 0.65,
 			["mage_energy_bolt"] = 0.75,
@@ -124,6 +166,11 @@ script CombatFxLogic extends Logic
 			["mage_energy_claw"] = 1.0,
 			["mage_fire_arrow"] = 1.0,
 			["mage_thunder_bolt"] = 0.7,
+			["mage_explosion"] = 1.05,
+			["mage_ice_strike"] = 0.45,
+			["mage_thunder_spear"] = 0.7,
+			["mage_holy_symbol"] = 1.0,
+			["mage_shining_ray"] = 0.35,
 			["mage_meteor"] = 0.85,
 			["mage_poison_mist"] = 0.45,
 			["mage_chain_lightning"] = 0.55,
@@ -131,7 +178,11 @@ script CombatFxLogic extends Logic
 			["mage_heal"] = 1.0,
 			["mage_angel_ray"] = 0.35,
 			["thief_double_stab"] = 0.6,
+			["thief_savage_blow"] = 0.75,
 			["thief_lucky_seven"] = 1.85,
+			["thief_drain"] = 1.25,
+			["thief_shadow_partner"] = 1.0,
+			["thief_assaulter"] = 0.85,
 			["thief_triple_seven"] = 1.25,
 		}
 		local s = scaleByFxKey[fxKey]

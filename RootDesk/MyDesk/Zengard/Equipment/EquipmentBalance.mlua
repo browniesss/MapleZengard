@@ -40,6 +40,10 @@ script EquipmentBalance extends Logic
 			{ id = "eq_red_whip", name = "붉은 채찍", desc = "공격 대상 +1", stats = { targetAdd = 1 }, iconRuid = "07640dacfe6644bd81a180660bf67880" },
 			{ id = "eq_old_maple_book", name = "낡은 단풍 서적", desc = "경험치 획득 +15%", stats = { expGainMul = 0.15 }, iconRuid = "c6f24ead63214cd48c45385528ddd60d" },
 			{ id = "eq_lucky_charm", name = "행운의 부적", desc = "전리품 드랍률 +10%p", stats = { lootDropAdd = 0.10 }, iconRuid = "ab37d9c03a2648468678e79ad7519326" },
+			{ id = "eq_shadow_partner_charm", name = "쉐도우 파트너 계약", desc = "추가 행동 +25%p, 추가 행동 피해 55%", stats = { extraActionChance = 0.25, extraActionDamageMul = 0.55 }, iconRuid = "thumbnail://cc7f34b0c45d49679a7b9ffcd71341ee" },
+			{ id = "eq_sniper_scope", name = "스나이퍼 스코프", desc = "사거리 +1, 치명타 +8%p", stats = { rangeAdd = 1, critChanceAdd = 0.08 }, iconRuid = "thumbnail://a7d36a70a3944508b71afad2945855f5" },
+			{ id = "eq_holy_symbol_totem", name = "홀리 심볼 토템", desc = "경험치 +10%, 전리품 +8%p", stats = { expGainMul = 0.10, lootDropAdd = 0.08 }, iconRuid = "thumbnail://dcb4c7f7039147e0ac88ac981e9fafc9" },
+			{ id = "eq_combo_core", name = "콤보 코어", desc = "공격력 +7%, 스킬 피해 +10%", stats = { atkMul = 0.07, skillDmgMul = 0.10 }, iconRuid = "754fc2f3e27d4917a3d3b1d9a599289d" },
 		}
 		local byId = {}
 		for _, card in ipairs(cards) do
