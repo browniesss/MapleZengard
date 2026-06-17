@@ -1,0 +1,8 @@
+@Event
+script LevelUpEvent extends EventType
+
+	property string userId = ""
+
+	property integer newLevel = 0
+
+end

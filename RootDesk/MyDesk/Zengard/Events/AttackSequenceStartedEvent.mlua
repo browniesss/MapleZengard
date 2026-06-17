@@ -1,0 +1,6 @@
+@Event
+script AttackSequenceStartedEvent extends EventType
+
+	property integer zenIndex = 0
+
+end

@@ -1,0 +1,460 @@
+@Logic
+script PlayerDataLogic extends Logic
+
+	-- UserDataStorage key holding the account record (MASTER_PLAN §6)
+	property string DATA_KEY_META = "meta"
+
+	property integer SCHEMA_VERSION = 1
+
+	-- C-24 discipline: dirty + 30s debounce flush
+	property number FLUSH_INTERVAL_SEC = 30.0
+
+	-- DataStorage error codes (datastorage.md §6)
+	property integer ERROR_OK = 0
+	property integer ERROR_NOT_FOUND = 1000002
+	property integer ERROR_TIMED_OUT = 1000004
+	property integer ERROR_RESOURCE_EXHAUSTED = 1000005
+	property integer ERROR_PARTIAL_FAILURE = 1000006
+
+	-- userId → { storage, meta, sections, sectionLoaded, dirtySections, dirtyMeta }
+	property any users = nil
+
+	-- userId set awaiting a SyncMetaStatus push (frame-coalesced, E1)
+	property any pushPending = nil
+
+	property boolean pushDirty = false
+
+	property integer flushTimerId = 0
+
+	-- ResourceExhausted doubles the effective flush interval (E9)
+	property integer flushBackoff = 1
+
+	property integer flushTickCount = 0
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Single persistence gateway (C-24): entry GetAndWait → cache → dirty+debounce → exit SetAndWait.
+		if self.users == nil then self.users = {} end
+		if self.pushPending == nil then self.pushPending = {} end
+		self.flushTimerId = _TimerService:SetTimerRepeat(self.FlushTick, self.FLUSH_INTERVAL_SEC)
+		log("[PlayerDataLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- World session end: synchronous flush for every cached user.
+		if self.flushTimerId ~= 0 then
+			_TimerService:ClearTimer(self.flushTimerId)
+			self.flushTimerId = 0
+		end
+		if self.users == nil then return end
+		for userId, _ in pairs(self.users) do
+			self:FlushUser(userId, true)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- Frame-level debounce so multi-kill bursts push at most once per frame (E1).
+		if not self.pushDirty then return end
+		self.pushDirty = false
+		local pending = self.pushPending
+		self.pushPending = {}
+		for userId, _ in pairs(pending) do
+			if self.users ~= nil and self.users[userId] ~= nil then
+				self:PushMetaStatus(userId)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- Entry-time load is the only blocking read of the account record (C-24).
+		self:EnsureLoaded(event.UserId)
+		self:QueuePush(event.UserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- Exit SetAndWait flush (one retry on failure) before dropping the cache.
+		local userId = event.UserId
+		if self.users == nil or self.users[userId] == nil then return end
+		self:FlushUser(userId, true)
+		local user = self.users[userId]
+		if user ~= nil and (user.dirtyMeta or self:HasDirtySection(user)) then
+			self:FlushUser(userId, true)
+		end
+		self.users[userId] = nil
+		if self.pushPending ~= nil then self.pushPending[userId] = nil end
+		log("[PlayerDataLogic] user data unloaded: userId=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table EnsureLoaded(string userId)
+		-- GetAndWait once per user, then every read/write goes through this cache (C-24).
+		if self.users == nil then self.users = {} end
+		local user = self.users[userId]
+		if user ~= nil then return user end
+		user = {
+			storage = _DataStorageService:GetUserDataStorage(userId),
+			meta = nil,
+			sections = {},
+			sectionLoaded = {},
+			dirtySections = {},
+			dirtyMeta = false,
+		}
+		local errorCode, raw = user.storage:GetAndWait(self.DATA_KEY_META)
+		if errorCode ~= self.ERROR_OK and errorCode ~= self.ERROR_NOT_FOUND then
+			-- One retry on transient failure before falling back to defaults.
+			log_warning("[PlayerDataLogic] meta load failed: errorCode=" .. tostring(errorCode) .. " userId=" .. userId .. ", retrying")
+			errorCode, raw = user.storage:GetAndWait(self.DATA_KEY_META)
+		end
+		if errorCode == self.ERROR_OK and raw ~= nil and raw ~= "" then
+			user.meta = _UtilLogic:StringToTable(raw)
+		elseif errorCode ~= self.ERROR_OK and errorCode ~= self.ERROR_NOT_FOUND then
+			log_warning("[PlayerDataLogic] meta load failed twice: errorCode=" .. tostring(errorCode) .. " userId=" .. userId .. ", using defaults")
+		end
+		self:EnsureSchema(user)
+		self.users[userId] = user
+		log("[PlayerDataLogic] data loaded: userId=" .. userId .. " meso=" .. tostring(user.meta.meso) .. " redMeso=" .. tostring(user.meta.redMeso) .. " energy=" .. tostring(user.meta.energy.amount))
+		return user
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnsureSchema(table user)
+		-- E14: field-by-field defaults so older schema versions migrate in place.
+		local meta = user.meta
+		if meta == nil then
+			meta = {}
+			user.meta = meta
+			user.dirtyMeta = true
+		end
+		if meta.v == nil or meta.v < self.SCHEMA_VERSION then
+			meta.v = self.SCHEMA_VERSION
+			user.dirtyMeta = true
+		end
+		if meta.meso == nil then
+			meta.meso = 0
+			user.dirtyMeta = true
+		end
+		if meta.redMeso == nil then
+			meta.redMeso = 0
+			user.dirtyMeta = true
+		end
+		if meta.challengeCoin == nil then
+			meta.challengeCoin = _BmBalance.CHALLENGE_COIN_INITIAL
+			user.dirtyMeta = true
+		end
+		if meta.energy == nil then
+			meta.energy = { amount = _BmBalance.ENERGY_MAX, lastRefillAt = self:GetUtcNowSec() }
+			user.dirtyMeta = true
+		end
+		if meta.metaGrowth == nil then
+			meta.metaGrowth = self:BuildDefaultMetaGrowthJson()
+			user.dirtyMeta = true
+		elseif type(meta.metaGrowth) == "table" then
+			meta.metaGrowth = _HttpService:JSONEncode(meta.metaGrowth)
+			user.dirtyMeta = true
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetMeso(string userId)
+		-- Cache read only; no storage roundtrip.
+		return self:EnsureLoaded(userId).meta.meso
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetRedMeso(string userId)
+		-- Cache read only; no storage roundtrip.
+		return self:EnsureLoaded(userId).meta.redMeso
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetChallengeCoin(string userId)
+		-- Cache read only; no storage roundtrip (C-25).
+		return self:EnsureLoaded(userId).meta.challengeCoin
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddCurrency(string userId, string kind, integer amount)
+		-- kind: "meso"|"redMeso". Negative deltas must go through TrySpendCurrency (E15).
+		if amount <= 0 then return end
+		local user = self:EnsureLoaded(userId)
+		if kind == "meso" then
+			user.meta.meso += amount
+		elseif kind == "redMeso" then
+			user.meta.redMeso += amount
+		else
+			log_warning("[PlayerDataLogic] AddCurrency invalid kind: " .. tostring(kind))
+			return
+		end
+		user.dirtyMeta = true
+		self:QueuePush(userId)
+		log("[PlayerDataLogic] currency added: kind=" .. kind .. " amount=" .. tostring(amount) .. " userId=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TrySpendCurrency(string userId, string kind, integer amount)
+		-- Validate→deduct in one server method; the non-wait section is atomic (spec §7.5).
+		if amount <= 0 then return false end
+		local user = self:EnsureLoaded(userId)
+		if kind == "meso" then
+			if user.meta.meso < amount then return false end
+			user.meta.meso -= amount
+		elseif kind == "redMeso" then
+			if user.meta.redMeso < amount then return false end
+			user.meta.redMeso -= amount
+		else
+			log_warning("[PlayerDataLogic] TrySpendCurrency invalid kind: " .. tostring(kind))
+			return false
+		end
+		user.dirtyMeta = true
+		self:QueuePush(userId)
+		log("[PlayerDataLogic] currency spent: kind=" .. kind .. " amount=" .. tostring(amount) .. " userId=" .. userId)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TrySpendChallengeCoin(string userId, integer count)
+		-- CHALLENGE entry cost (C-25); refunds come back via AddChallengeCoin.
+		if count <= 0 then return false end
+		local user = self:EnsureLoaded(userId)
+		if user.meta.challengeCoin < count then return false end
+		user.meta.challengeCoin -= count
+		user.dirtyMeta = true
+		self:QueuePush(userId)
+		log("[PlayerDataLogic] challenge coin spent: count=" .. tostring(count) .. " remaining=" .. tostring(user.meta.challengeCoin) .. " userId=" .. userId)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddChallengeCoin(string userId, integer count)
+		-- Clear refund path (C-25).
+		if count <= 0 then return end
+		local user = self:EnsureLoaded(userId)
+		user.meta.challengeCoin += count
+		user.dirtyMeta = true
+		self:QueuePush(userId)
+		log("[PlayerDataLogic] challenge coin added: count=" .. tostring(count) .. " total=" .. tostring(user.meta.challengeCoin) .. " userId=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetSection(string userId, string sectionKey)
+		-- "metaGrowth" lives inside the meta record (§6); other sections are own storage keys, lazy-loaded once.
+		local user = self:EnsureLoaded(userId)
+		if sectionKey == "metaGrowth" then
+			if type(user.meta.metaGrowth) == "string" then
+				return user.meta.metaGrowth
+			end
+			user.meta.metaGrowth = _HttpService:JSONEncode(user.meta.metaGrowth)
+			user.dirtyMeta = true
+			return user.meta.metaGrowth
+		end
+		if sectionKey == self.DATA_KEY_META then
+			log_warning("[PlayerDataLogic] GetSection cannot target the meta record directly")
+			return ""
+		end
+		if not user.sectionLoaded[sectionKey] then
+			local errorCode, raw = user.storage:GetAndWait(sectionKey)
+			if errorCode == self.ERROR_OK then
+				user.sections[sectionKey] = raw
+				user.sectionLoaded[sectionKey] = true
+			elseif errorCode == self.ERROR_NOT_FOUND then
+				user.sectionLoaded[sectionKey] = true
+			else
+				-- Not cached on transient failure so the next call retries the read.
+				log_warning("[PlayerDataLogic] section load failed: key=" .. sectionKey .. " errorCode=" .. tostring(errorCode) .. " userId=" .. userId)
+			end
+		end
+		return user.sections[sectionKey] or ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetSection(string userId, string sectionKey, string data)
+		-- Dirty-marked only; the actual write rides the debounce flush (C-24).
+		local user = self:EnsureLoaded(userId)
+		if sectionKey == "metaGrowth" then
+			if _UtilLogic:IsNilorEmptyString(data) then
+				user.meta.metaGrowth = self:BuildDefaultMetaGrowthJson()
+			else
+				user.meta.metaGrowth = data
+			end
+			user.dirtyMeta = true
+			return
+		end
+		if sectionKey == self.DATA_KEY_META then
+			log_warning("[PlayerDataLogic] SetSection cannot target the meta record directly")
+			return
+		end
+		if user.sections[sectionKey] == data then return end
+		user.sections[sectionKey] = data
+		user.sectionLoaded[sectionKey] = true
+		user.dirtySections[sectionKey] = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetEnergyState(string userId)
+		-- Shared by reference with EnergyLogic (internal); mutators must call MarkMetaDirty.
+		return self:EnsureLoaded(userId).meta.energy
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkMetaDirty(string userId)
+		-- For owner logics that mutate sub-tables of the cached meta record (internal).
+		if self.users == nil then return end
+		local user = self.users[userId]
+		if user == nil then return end
+		user.dirtyMeta = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetUtcNowSec()
+		-- Server UTC milliseconds → seconds; client clocks are never trusted (E7).
+		return math.floor(DateTime.UtcNow.Elapsed / 1000)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void QueuePush(string userId)
+		-- Coalesces SyncMetaStatus pushes; drained in OnUpdate (E1).
+		if self.pushPending == nil then self.pushPending = {} end
+		self.pushPending[userId] = true
+		self.pushDirty = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushMetaStatus(string userId)
+		-- Single push point for the meta HUD; run-scoped numbers come from their owner logics.
+		local user = self.users[userId]
+		if user == nil then return end
+		local energy = _EnergyLogic:GetEnergy(userId) or 0
+		local nextRefillSec = _EnergyLogic:GetNextRefillRemainingSec(userId) or 0
+		local remainingRerolls = _RerollLogic:GetRemainingRerolls(userId) or 0
+		local lootCount = _LootLogic:GetLootCount(userId) or 0
+		self:SyncMetaStatus(user.meta.meso, user.meta.redMeso, energy, nextRefillSec, remainingRerolls, lootCount, self:GetChallengeCoin(userId))
+	end
+
+	@ExecSpace("Server")
+	method void RequestSyncMetaStatus()
+		-- Client-initiated first sync to dodge the UI OnBeginPlay race (spec §5.3).
+		-- senderUserId is server-assigned; empty when the caller's LocalPlayer is not ready yet (E7).
+		-- UserEnterEvent already loads the record, so a missed push is harmless — skip instead of erroring.
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			log_warning("[PlayerDataLogic] RequestSyncMetaStatus skipped: empty senderUserId")
+			return
+		end
+		self:EnsureLoaded(userId)
+		self:QueuePush(userId)
+	end
+
+	@ExecSpace("Client")
+	method void SyncMetaStatus(integer meso, integer redMeso, integer energy, integer nextRefillSec, integer remainingRerolls, integer lootCount, integer challengeCoin)
+		-- Cached client-side so the Wave-3 meta HUD can pull via GetClientMetaStatus.
+		self._T.lastMetaStatus = {
+			meso = meso,
+			redMeso = redMeso,
+			energy = energy,
+			nextRefillSec = nextRefillSec,
+			remainingRerolls = remainingRerolls,
+			lootCount = lootCount,
+			challengeCoin = challengeCoin,
+		}
+		log("[PlayerDataLogic] meta status synced: meso=" .. tostring(meso) .. " redMeso=" .. tostring(redMeso) .. " energy=" .. tostring(energy) .. " rerolls=" .. tostring(remainingRerolls) .. " loot=" .. tostring(lootCount) .. " challengeCoin=" .. tostring(challengeCoin))
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetClientMetaStatus()
+		-- nil until the first SyncMetaStatus push arrives.
+		return self._T.lastMetaStatus
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushTick()
+		-- Debounce gate: ResourceExhausted doubles the effective flush interval (E9).
+		self.flushTickCount += 1
+		if self.flushTickCount < self.flushBackoff then return end
+		self.flushTickCount = 0
+		if self.users == nil then return end
+		for userId, _ in pairs(self.users) do
+			self:FlushUser(userId, false)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushUser(string userId, boolean useWait)
+		-- Batch-writes dirty keys only; failures re-mark dirty for the next window (E9).
+		local user = self.users[userId]
+		if user == nil then return end
+		local kv = {}
+		local hadMeta = user.dirtyMeta
+		local sectionKeys = {}
+		if hadMeta then
+			kv[self.DATA_KEY_META] = _UtilLogic:TableToString(user.meta)
+		end
+		for sectionKey, isDirty in pairs(user.dirtySections) do
+			if isDirty then
+				kv[sectionKey] = user.sections[sectionKey] or ""
+				table.insert(sectionKeys, sectionKey)
+			end
+		end
+		if not hadMeta and #sectionKeys == 0 then return end
+		user.dirtyMeta = false
+		user.dirtySections = {}
+		if useWait then
+			local errorCode, successKeys = user.storage:BatchSetAndWait(kv)
+			self:HandleFlushResult(userId, errorCode, hadMeta, sectionKeys)
+		else
+			user.storage:BatchSetAsync(kv, function(errorCode, successKeys)
+				self:HandleFlushResult(userId, errorCode, hadMeta, sectionKeys)
+			end)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void HandleFlushResult(string userId, integer errorCode, boolean hadMeta, table sectionKeys)
+		-- In-memory state survives storage failures so play never stalls (E9).
+		if errorCode == self.ERROR_OK then
+			self.flushBackoff = 1
+			log("[PlayerDataLogic] data flushed: userId=" .. userId)
+			return
+		end
+		local user = self.users ~= nil and self.users[userId] or nil
+		if user ~= nil then
+			if hadMeta then user.dirtyMeta = true end
+			for _, sectionKey in ipairs(sectionKeys) do
+				user.dirtySections[sectionKey] = true
+			end
+		end
+		if errorCode == self.ERROR_RESOURCE_EXHAUSTED then
+			self.flushBackoff *= 2
+			log_warning("[PlayerDataLogic] flush ResourceExhausted: backoff x" .. tostring(self.flushBackoff) .. " userId=" .. userId)
+		else
+			log_warning("[PlayerDataLogic] flush failed: errorCode=" .. tostring(errorCode) .. " userId=" .. userId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean HasDirtySection(table user)
+		-- Leave-time retry guard.
+		for _, isDirty in pairs(user.dirtySections) do
+			if isDirty then return true end
+		end
+		return false
+	end
+
+	method string BuildDefaultMetaGrowthJson()
+		-- Stores nested meta-growth as JSON so the flat meta record can persist it safely.
+		return _HttpService:JSONEncode({
+			stats = { atk = 0, exp = 0, loot = 0 },
+			equips = {
+				weapon = { own = 0, lv = 0 },
+				armor = { own = 0, lv = 0 },
+				charm = { own = 0, lv = 0 },
+			},
+		})
+	end
+
+end

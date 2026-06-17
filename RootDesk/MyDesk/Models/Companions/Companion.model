@@ -1,0 +1,44 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "model://companion",
+  "ContentType": "x-mod/model",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "Version": 1,
+      "Name": "Companion",
+      "BaseModelId": null,
+      "Id": "companion",
+      "Components": [
+        "MOD.Core.TransformComponent",
+        "MOD.Core.AvatarRendererComponent",
+        "MOD.Core.CostumeManagerComponent",
+        "MOD.Core.StateComponent",
+        "MOD.Core.AvatarStateAnimationComponent",
+        "script.CompanionComponent"
+      ],
+      "Properties": [],
+      "Values": [
+        {
+          "TargetType": "MOD.Core.CostumeManagerComponent",
+          "Name": "UseCustomEquipOnly",
+          "ValueType": {
+            "$type": "MODNativeType",
+            "type": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+          },
+          "Value": true
+        }
+      ],
+      "EventLinks": [],
+      "Children": []
+    }
+  }
+}

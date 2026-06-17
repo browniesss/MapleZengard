@@ -1,0 +1,75 @@
+@Logic
+script MetaGrowthBalance extends Logic
+
+	-- MASTER_PLAN §7.8. Cap check: full upgrade atkMul total = 0.05 + 0.02 = +7%,
+	-- intentionally below one equipment card (+13%) so meta growth stays minor (R10).
+
+	property integer STAT_MAX_LEVEL = 10
+
+	property integer STAT_COST_BASE_MESO = 100
+
+	property number STAT_COST_GROWTH_RATE = 1.5
+
+	property integer EQUIP_MAX_ENHANCE_LEVEL = 5
+
+	property integer EQUIP_ENHANCE_COST_PER_LEVEL_MESO = 300
+
+	property integer EQUIP_FINAL_ENHANCE_RED_MESO_COST = 1
+
+	method table GetAllStatKeys()
+		-- Stat track keys in display order.
+		return { "atk", "exp", "loot" }
+	end
+
+	method table GetStatTrack(string statKey)
+		-- Returns { key, name, multiplierKey, perLevel } or nil when statKey is unknown.
+		if self._T.statTracks == nil then
+			self:BuildTables()
+		end
+		return self._T.statTracks[statKey]
+	end
+
+	method integer GetStatUpgradeCost(integer currentLevel)
+		-- Meso cost to go from currentLevel to currentLevel+1: floor(100 * 1.5^Lv).
+		return math.floor(self.STAT_COST_BASE_MESO * (self.STAT_COST_GROWTH_RATE ^ currentLevel))
+	end
+
+	method table GetAllEquipSlotKeys()
+		-- Meta-equipment slot keys in display order.
+		return { "weapon", "armor", "charm" }
+	end
+
+	method table GetEquipDef(string slotKey)
+		-- Returns { key, name, priceMeso, multiplierKey, perLevel } or nil when slotKey is unknown.
+		if self._T.equipDefs == nil then
+			self:BuildTables()
+		end
+		return self._T.equipDefs[slotKey]
+	end
+
+	method integer GetEquipEnhanceCost(integer targetLevel)
+		-- Meso cost to enhance up to targetLevel: 300 * Lv.
+		return self.EQUIP_ENHANCE_COST_PER_LEVEL_MESO * targetLevel
+	end
+
+	method boolean NeedsRedMesoForEnhance(integer targetLevel)
+		-- Only the final enhance step (Lv4 -> Lv5) additionally costs red meso (§7.8).
+		return targetLevel >= self.EQUIP_MAX_ENHANCE_LEVEL
+	end
+
+	method void BuildTables()
+		-- Builds lookup tables lazily; property declarations cannot hold table literals.
+		-- multiplierKey uses the GetEquipStatMultipliers schema (MASTER_PLAN §4.8).
+		self._T.statTracks = {
+			atk = { key = "atk", name = "공격력 단련", multiplierKey = "atkMul", perLevel = 0.005 },
+			exp = { key = "exp", name = "학습 능력", multiplierKey = "expGainMul", perLevel = 0.01 },
+			loot = { key = "loot", name = "수집가의 눈", multiplierKey = "lootDropAdd", perLevel = 0.003 },
+		}
+		self._T.equipDefs = {
+			weapon = { key = "weapon", name = "수련용 목검", priceMeso = 1000, multiplierKey = "atkMul", perLevel = 0.004 },
+			armor = { key = "armor", name = "수련복", priceMeso = 1500, multiplierKey = "expGainMul", perLevel = 0.008 },
+			charm = { key = "charm", name = "수련 명패", priceMeso = 2000, multiplierKey = "lootDropAdd", perLevel = 0.004 },
+		}
+	end
+
+end

@@ -1,0 +1,8 @@
+@Event
+script SkillFusedEvent extends EventType
+
+	property string userId = ""
+	property string recipeId = ""
+	property string resultSkillId = ""
+
+end

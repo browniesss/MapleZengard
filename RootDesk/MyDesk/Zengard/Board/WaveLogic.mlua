@@ -1,0 +1,369 @@
+@Logic
+script WaveLogic extends Logic
+
+	@Sync
+	property integer CurrentZen = 0
+
+	@Sync
+	property integer MonsterCount = 0
+
+	@Sync
+	property boolean IsZenAvailable = true
+
+	property number cooldownLeft = 0
+
+	property boolean processingZen = false
+
+	property boolean forcedBoss = false
+
+	property string currentStageId = ""
+
+	property any stageConfig = nil
+
+	property table playerCells = {}
+
+	property any monsterKilledHandler = nil
+
+	property any attackSeqEndedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Subscribes kill / sequence-end events for MonsterCount bookkeeping (MASTER_PLAN §3).
+		log("[WaveLogic] OnBeginPlay")
+		self.monsterKilledHandler = _ZengardGameLogic:ConnectEvent(MonsterKilledEvent, self.OnMonsterKilled)
+		self.attackSeqEndedHandler = _ZengardGameLogic:ConnectEvent(AttackSequenceEndedEvent, self.OnAttackSequenceEnded)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Mandatory release of everything connected in OnBeginPlay.
+		if self.monsterKilledHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(MonsterKilledEvent, self.monsterKilledHandler)
+			self.monsterKilledHandler = nil
+		end
+		if self.attackSeqEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(AttackSequenceEndedEvent, self.attackSeqEndedHandler)
+			self.attackSeqEndedHandler = nil
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- Delta-accumulated cooldown: ElapsedSeconds anchoring is banned (per-session pollution, spec §6-11).
+		if self.cooldownLeft > 0 then
+			self.cooldownLeft -= delta
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestZen()
+		-- HUD zen button entry point. Guard order is the §1.2 contract: IsInStage -> available -> reentry -> cooldown.
+		if not _ZengardGameLogic:IsInStage() then
+			return
+		end
+		if not self.IsZenAvailable then
+			return
+		end
+		if self.processingZen then
+			return
+		end
+		if _CombatLogic:IsProcessingSequence() then
+			-- The 1.0s zen cooldown is shorter than a full combat sequence, so a rapid double-tap can pass
+			-- the cooldown while the previous zen's combat is still running. Reject (no-op) instead of
+			-- starting a zen whose ExecuteZenCombat would hit the re-entry guard and drop its combat.
+			return
+		end
+		if self.cooldownLeft > 0 then
+			return
+		end
+		self:StartZen()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ForceBossZen()
+		-- R8 special-condition hook: the next zen becomes the boss zen.
+		self.forcedBoss = true
+		log("[WaveLogic] boss zen forced")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetWave(string stageId)
+		-- The only reset path for run state; @Logic survives map transitions (spec §6-12).
+		self.currentStageId = stageId
+		self.stageConfig = _StageCatalogLogic:GetStageConfig(stageId)
+		self.CurrentZen = 0
+		self.MonsterCount = 0
+		self.IsZenAvailable = true
+		self.processingZen = false
+		self.forcedBoss = false
+		self.cooldownLeft = 0
+		self.playerCells = {}
+		log("[WaveLogic] wave reset: " .. stageId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartZen()
+		-- Zen pipeline §1.2 — this exact order is the contract; do not reorder.
+		local cfg = self.stageConfig
+		if cfg == nil then
+			log_error("[WaveLogic] StartZen without stage config; call ResetWave first")
+			return
+		end
+		self.processingZen = true
+		self.cooldownLeft = _BoardConfig.ZEN_COOLDOWN_SECONDS
+		self.CurrentZen += 1
+		local isBossZen = (self.CurrentZen >= cfg.bossZen) or self.forcedBoss
+		log("[WaveLogic] zen started: " .. self.CurrentZen .. (isBossZen and " (boss)" or ""))
+		_MonsterLogic:OnZenAging(self.CurrentZen)
+		local spawned = 0
+		if isBossZen then
+			self.forcedBoss = false
+			_CompanionLogic:OnBossZenImminent(self.CurrentZen)
+			_BossLogic:TrySpawnBoss()
+			-- Keep zen available through the whole boss phase. The boss fight is entirely zen-driven:
+			-- each zen runs BossLogic.OnBossZenTick (split/pattern via OnZenAging) + ExecuteZenCombat
+			-- against the boss. The old code set IsZenAvailable=false on boss spawn and only re-enabled it
+			-- when the spawn FAILED, so a successful boss spawn froze the phase (zen button dead, boss
+			-- never took damage, nothing advanced).
+			if not _BossLogic:IsBossAlive() then
+				log_warning("[WaveLogic] boss spawn deferred to next zen")
+			end
+		else
+			spawned = self:SpawnMonsters(cfg.monstersPerZen)
+			local repositionMonsters = cfg.repositionMonstersOnZen
+			if repositionMonsters == nil then
+				repositionMonsters = _BoardConfig.REPOSITION_MONSTERS_ON_ZEN
+			end
+			if repositionMonsters then
+				self:ReshuffleMonsters()
+			end
+		end
+		self:RepositionPlayer()
+		_CompanionLogic:RepositionAll()
+		self.MonsterCount = _MonsterLogic:GetAliveMonsterCount()
+		local ev = ZenStartedEvent()
+		ev.zenIndex = self.CurrentZen
+		ev.isBossZen = isBossZen
+		ev.spawnedCount = spawned
+		_ZengardGameLogic:SendGameEvent(ev)
+		if (not isBossZen) and self.MonsterCount >= cfg.failThreshold then
+			log("[WaveLogic] stage failed: monster_overflow count=" .. self.MonsterCount)
+			_ZengardGameLogic:NotifyStageFailed("monster_overflow")
+			self.processingZen = false
+			return
+		end
+		_CombatLogic:ExecuteZenCombat(self.CurrentZen)
+		self.processingZen = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer SpawnMonsters(integer count)
+		-- Cell draw + weighted type draw only; spawn authority belongs to MonsterLogic (C-3).
+		local cfg = self.stageConfig
+		local emptyCells = _BoardLogic:GetRandomEmptyCells(count)
+		local spawned = 0
+		for _, cell in ipairs(emptyCells) do
+			local typeId = self:PickMonsterType(cfg.spawnWeights)
+			if typeId == "" then
+				log_error("[WaveLogic] no spawnable monster type for stage " .. self.currentStageId)
+				break
+			end
+			local monsterId = _MonsterLogic:SpawnMonster(typeId, cell.col, cell.row)
+			if monsterId ~= nil and monsterId ~= "" then
+				spawned += 1
+			else
+				log_error("[WaveLogic] spawn failed: " .. typeId)
+			end
+		end
+		if spawned < count then
+			log_warning("[WaveLogic] board short of empty cells: " .. spawned .. "/" .. count)
+		end
+		return spawned
+	end
+
+	method string PickMonsterType(table spawnWeights)
+		-- Interval draw over the weight sum; pairs() order nondeterminism is harmless here (spec §5.2).
+		local total = 0
+		for _, weight in pairs(spawnWeights) do
+			total += weight
+		end
+		if total <= 0 then
+			return ""
+		end
+		local roll = _UtilLogic:RandomIntegerRange(1, total)
+		local acc = 0
+		for typeId, weight in pairs(spawnWeights) do
+			acc += weight
+			if roll <= acc then
+				return typeId
+			end
+		end
+		return ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RepositionPlayer()
+		-- R4: player pieces are randomly re-placed on every zen (and at stage start, §1.1-10).
+		local map = self:GetMapEntity()
+		if not isvalid(map) then
+			log_error("[WaveLogic] map entity not found: " .. _BoardConfig.MAP_ENTITY_PATH)
+			return
+		end
+		local users = _UserService:GetUsersByMapComponent(map.MapComponent)
+		if users == nil then
+			log_warning("[WaveLogic] no players on map; reposition skipped")
+			return
+		end
+		for _, userEntity in pairs(users) do
+			if isvalid(userEntity) then
+				self:PlacePlayerAtRandomCell(userEntity)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnsurePlayerBoardMode(Entity playerEntity)
+		-- The board is a static-coordinate game on a MapleTile map; the DefaultPlayer must NOT fall or
+		-- be input-driven, otherwise gravity drags it back to the map foothold (origin) every frame and
+		-- the placed cell is lost. Disable input + gravity so the Transform/rigidbody write holds.
+		local rb = playerEntity.RigidbodyComponent
+		if isvalid(rb) then
+			rb.Gravity = 0
+			rb.KinematicMove = true
+		end
+		local pc = playerEntity.PlayerControllerComponent
+		if isvalid(pc) then
+			pc.Enable = false
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlacePlayerAtRandomCell(Entity playerEntity)
+		-- Gravity/input are disabled first so the placement is not overwritten by physics next frame.
+		self:EnsurePlayerBoardMode(playerEntity)
+		local emptyCells = _BoardLogic:GetRandomEmptyCells(1)
+		if #emptyCells == 0 then
+			log_warning("[WaveLogic] no empty cell; player stays")
+			return
+		end
+		local playerId = playerEntity.Id
+		local prev = self.playerCells[playerId]
+		if prev ~= nil then
+			_BoardLogic:Release(prev.col, prev.row, playerId)
+		end
+		local cell = emptyCells[1]
+		if not _BoardLogic:TryOccupy(cell.col, cell.row, playerId, "player") then
+			log_warning("[WaveLogic] player cell occupy failed at " .. cell.col .. "," .. cell.row)
+			return
+		end
+		-- Player uses its OWN foot offset (PLAYER_VERTICAL_OFFSET), not the monster ApplyCellFitOffset:
+		-- the avatar's visible character is taller than a 0.72u monster sprite, so it needs to drop a bit
+		-- more to sit centered in the cell instead of riding high / reading as "between cells".
+		local cellWorld = _BoardLogic:CellToWorld(cell.col, cell.row)
+		local placePos = Vector3(cellWorld.x, cellWorld.y + _BoardConfig.PLAYER_VERTICAL_OFFSET, cellWorld.z)
+		playerEntity.TransformComponent.WorldPosition = placePos
+		-- Body-aware placement too: a rigidbody resets to its own tracked position otherwise.
+		local rb = playerEntity.RigidbodyComponent
+		if isvalid(rb) then
+			rb:SetWorldPosition(Vector2(placePos.x, placePos.y))
+		end
+		-- Board pieces share one in-cell size band (~70-80% of the 0.8u cell): the avatar is scaled to
+		-- match the monsters instead of towering over the cell. Single source: BoardConfig.PLAYER_BOARD_SCALE.
+		playerEntity.TransformComponent.Scale = Vector3(_BoardConfig.PLAYER_BOARD_SCALE, _BoardConfig.PLAYER_BOARD_SCALE, 1)
+		self.playerCells[playerId] = { col = cell.col, row = cell.row }
+		-- Pin the piece on the OWNING client too: the server's Gravity/KinematicMove writes do not sync, so
+		-- without this the client keeps gravity and drags the player off its placed cell (renders at a wrong
+		-- cell while the server still targets the correct one).
+		local pcomp = playerEntity.PlayerComponent
+		if isvalid(pcomp) then
+			self:PinPlayerOnClient(placePos.x, placePos.y, pcomp.UserId)
+		end
+		local renderer = playerEntity.AvatarRendererComponent
+		if isvalid(renderer) then
+			renderer.SortingLayer = _BoardConfig.BOARD_SORTING_LAYER
+			renderer.OrderInLayer = _BoardConfig:GetOrderInLayer(cell.row)
+		end
+		log("[WaveLogic] player repositioned to " .. cell.col .. "," .. cell.row)
+	end
+
+	@ExecSpace("Client")
+	method void PinPlayerOnClient(number x, number y)
+		-- The owning client is authoritative for the player's physics, and Gravity/KinematicMove set on the
+		-- server do NOT sync (verified: client gravity stays 1.0). So the client keeps gravity, pulls the
+		-- board piece off its placed cell down to a foothold, then syncs that back -- the server attacks from
+		-- the correct cell but the piece RENDERS elsewhere ("strikes from a weird position"). Disable the
+		-- board-piece physics and re-assert the placed position here, on the owning client, so it holds.
+		local p = _UserService.LocalPlayer
+		if not isvalid(p) then
+			return
+		end
+		local rb = p.RigidbodyComponent
+		if isvalid(rb) then
+			rb.Gravity = 0
+			rb.KinematicMove = true
+			rb:SetWorldPosition(Vector2(x, y))
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReshufflePlacement()
+		-- C-23 placement reroll: synchronous full re-placement of monsters + player + companions.
+		self:ReshuffleMonsters()
+		self:RepositionPlayer()
+		_CompanionLogic:RepositionAll()
+		log("[WaveLogic] placement reshuffled")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReshuffleMonsters()
+		-- Release-all-then-redraw avoids the pairwise swap deadlock (spec §5.5).
+		local monsters = _MonsterLogic:GetAliveMonsters()
+		if monsters == nil or #monsters == 0 then
+			return
+		end
+		for _, monster in ipairs(monsters) do
+			_BoardLogic:Release(monster.col, monster.row, monster.monsterId)
+		end
+		local emptyCells = _BoardLogic:GetRandomEmptyCells(#monsters)
+		for i, monster in ipairs(monsters) do
+			local occupantKind = monster.isBoss and "boss" or "monster"
+			local cell = emptyCells[i]
+			if cell == nil then
+				-- We released exactly #monsters cells, so this should not happen; keep the old cell.
+				_BoardLogic:TryOccupy(monster.col, monster.row, monster.monsterId, occupantKind)
+			else
+				-- MonsterLogic owns the registry + entity reference, so it relocates both
+				-- (the monsterId is an internal key, not an entity handle resolvable by EntityService).
+				_BoardLogic:TryOccupy(cell.col, cell.row, monster.monsterId, occupantKind)
+				_MonsterLogic:RelocateMonster(monster.monsterId, cell.col, cell.row)
+			end
+		end
+		log("[WaveLogic] monsters reshuffled: " .. #monsters)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(any event)
+		-- Param typed 'any': a typed user-event signature compiles only after the
+		-- event codeblock is registered; 'any' keeps this file build-order independent.
+		-- Recount from the single authority instead of decrementing, to absorb event-order races.
+		self.MonsterCount = _MonsterLogic:GetAliveMonsterCount()
+		log("[WaveLogic] monster killed: " .. event.typeId .. ", remain=" .. self.MonsterCount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnAttackSequenceEnded(any event)
+		-- Param typed 'any': see OnMonsterKilled (build-order independence).
+		-- §1.2-9: resync MonsterCount after the combat sequence settles all kills.
+		self.MonsterCount = _MonsterLogic:GetAliveMonsterCount()
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetMapEntity()
+		-- Lazy cache: @Logic has no self.Entity, so the board map is looked up by path (spec §3 note).
+		if not isvalid(self._T.mapEntity) then
+			self._T.mapEntity = _EntityService:GetEntityByPath(_BoardConfig.MAP_ENTITY_PATH)
+		end
+		return self._T.mapEntity
+	end
+
+end

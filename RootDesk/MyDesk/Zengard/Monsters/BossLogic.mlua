@@ -1,0 +1,185 @@
+@Logic
+script BossLogic extends Logic
+
+	-- Boss spawn / per-zen pattern roll / split (MASTER_PLAN §2.1).
+	-- HP itself lives in the MonsterLogic registry (boss is just one monster type).
+
+	property string bossMonsterId = ""
+
+	property boolean bossDefeated = false
+
+	property boolean splitDone = false
+
+	property number summonRateMul = 1.0
+
+	property string bossTypeId = "mushmom"
+
+	property any stageStartedEventHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Subscribes to the game bus to pick up per-stage boss settings (bossModelId/bossSummonRate).
+		log("[BossLogic] OnBeginPlay")
+		self.stageStartedEventHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Releases the bus subscription taken in OnBeginPlay.
+		if self.stageStartedEventHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedEventHandler)
+			self.stageStartedEventHandler = nil
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageStarted(StageStartedEvent event)
+		-- Caches the stage's boss type and summon-rate modifier from the stage catalog (C-6/C-7).
+		local cfg = _StageCatalogLogic:GetStageConfig(event.stageId)
+		if cfg ~= nil then
+			if cfg.bossModelId ~= nil then
+				self.bossTypeId = cfg.bossModelId
+			end
+			if cfg.modifiers ~= nil and cfg.modifiers.bossSummonRate ~= nil then
+				self.summonRateMul = cfg.modifiers.bossSummonRate
+			else
+				self.summonRateMul = 1.0
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TrySpawnBoss()
+		-- §1.2 step 3 (caller: WaveLogic). Board-full failure defers to the next zen (D13) —
+		-- WaveLogic re-enters here every boss zen, so no retry state is needed.
+		if self.bossDefeated or self:IsBossAlive() then
+			return
+		end
+		local cell = _BoardLogic:GetEmptyCellNearestCenter()
+		if cell == nil then
+			log("[BossLogic] boss spawn deferred: board full")
+			return
+		end
+		local monsterId = _MonsterLogic:SpawnMonster(self.bossTypeId, cell.col, cell.row)
+		if monsterId == "" then
+			log_error("[BossLogic] boss spawn failed: " .. self.bossTypeId)
+			return
+		end
+		self.bossMonsterId = monsterId
+		self.splitDone = false
+		local ev = BossSpawnedEvent()
+		ev.monsterId = monsterId
+		ev.typeId = self.bossTypeId
+		ev.col = cell.col
+		ev.row = cell.row
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[BossLogic] boss spawned: " .. self.bossTypeId .. " at (" .. cell.col .. "," .. cell.row .. ") id=" .. monsterId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ForceSpawnBoss()
+		-- Special-condition hook (D8) — no prototype caller, kept for designer extension.
+		log("[BossLogic] force spawn boss requested")
+		self:TrySpawnBoss()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsBossAlive()
+		-- Alive = registered in MonsterLogic and not flagged dead.
+		if self.bossMonsterId == "" then
+			return false
+		end
+		local info = _MonsterLogic:GetMonsterInfo(self.bossMonsterId)
+		return info ~= nil and not info.isDead
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossZenTick(integer zenIndex)
+		-- §1.2 step 2 boss branch (caller: MonsterLogic.OnZenAging): split at zenAge 10 (certain, R14),
+		-- otherwise one pattern roll for this zen.
+		local info = _MonsterLogic:GetMonsterInfo(self.bossMonsterId)
+		if info == nil or info.isDead then
+			return
+		end
+		local zenAge = zenIndex - info.spawnZen
+		if zenAge >= _MonsterBalance.BOSS_SPLIT_ZEN_AGE and not self.splitDone then
+			self:SplitBoss(info)
+		else
+			self:RollPattern(info)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SplitBoss(table info)
+		-- D6: body keeps ceil(hp/2); clone gets floor(hp/2) (min 1). Board-full skips the clone
+		-- but the body HP halving still applies.
+		self.splitDone = true
+		local cloneHp = math.max(1, math.floor(info.hp / 2))
+		local bodyHp = math.ceil(info.hp / 2)
+		_MonsterLogic:SetMonsterHp(self.bossMonsterId, bodyHp, 0)
+		local data = _MonsterBalance:GetTypeData(info.typeId)
+		local splitTypeId = "mushmom_split"
+		if data ~= nil and data.splitTo ~= nil then
+			splitTypeId = data.splitTo
+		end
+		local cell = _MonsterLogic:PickAdjacentFirstEmptyCell(info.col, info.row)
+		if cell == nil then
+			log("[BossLogic] boss split skipped: board full (body hp=" .. bodyHp .. ")")
+			return
+		end
+		local splitId = _MonsterLogic:SpawnMonster(splitTypeId, cell.col, cell.row)
+		if splitId ~= "" then
+			_MonsterLogic:SetMonsterHp(splitId, cloneHp, cloneHp)
+		end
+		log("[BossLogic] boss split: body hp=" .. bodyHp .. " clone hp=" .. cloneHp .. " id=" .. splitId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RollPattern(table info)
+		-- D4: one roll per zen — summon / heal / idle. Summon with no empty cell degrades to idle.
+		local summonProb = math.min(1, _MonsterBalance.BOSS_PATTERN_SUMMON_PROB * self.summonRateMul)
+		local r = _UtilLogic:RandomDouble()
+		local pattern = "idle"
+		if r < summonProb then
+			local data = _MonsterBalance:GetTypeData(info.typeId)
+			local summonTypeId = "orangemushroom"
+			if data ~= nil and data.summonTypeId ~= nil then
+				summonTypeId = data.summonTypeId
+			end
+			local cells = _BoardLogic:GetRandomEmptyCells(1)
+			if cells ~= nil and #cells > 0 then
+				local spawnedId = _MonsterLogic:SpawnMonster(summonTypeId, cells[1].col, cells[1].row)
+				if spawnedId ~= "" then
+					pattern = "summon"
+				end
+			end
+		elseif r < summonProb + _MonsterBalance.BOSS_PATTERN_HEAL_PROB then
+			_MonsterLogic:HealMonster(self.bossMonsterId, info.maxHp * _MonsterBalance.BOSS_HEAL_RATIO)
+			pattern = "heal"
+		end
+		log("[BossLogic] boss pattern: " .. pattern)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossKilled(string monsterId, string attackerUserId, table drops)
+		-- System-internal (caller: MonsterLogic kill flow, §3 "BossLogic via MonsterLogic").
+		-- ZengardGameLogic subscribes BossKilledEvent for the clear transition.
+		self.bossDefeated = true
+		local ev = BossKilledEvent()
+		ev.monsterId = monsterId
+		ev.attackerUserId = attackerUserId
+		ev.drops = drops
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[BossLogic] boss killed: id=" .. monsterId .. " by " .. attackerUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForStage()
+		-- System-internal (caller: MonsterLogic.ResetForStage, §1.1 step 2).
+		self.bossMonsterId = ""
+		self.bossDefeated = false
+		self.splitDone = false
+		log("[BossLogic] reset for stage")
+	end
+
+end

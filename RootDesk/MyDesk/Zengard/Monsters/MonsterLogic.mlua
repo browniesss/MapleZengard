@@ -1,0 +1,564 @@
+@Logic
+script MonsterLogic extends Logic
+
+	-- Sole spawn/HP/kill authority (C-3/C-17). BoardLogic occupancy and this registry
+	-- are kept in sync here on spawn/kill/evolve (MASTER_PLAN §2.1).
+
+	property any registry = nil
+
+	property integer idCounter = 0
+
+	property string currentStageId = ""
+
+	property any stageModifiers = nil
+
+	property any mapEntity = nil
+
+	property any stageStartedEventHandler = nil
+
+	property any fitScaleCache = nil
+
+	method void OnInitialize()
+		-- Registry must exist before any server call lands.
+		self:EnsureBuilt()
+	end
+
+	method void EnsureBuilt()
+		-- Lazy guard: a server call may land before OnInitialize/OnBeginPlay runs.
+		-- Guards on nil only — ResetForStage wipes to {} and must not trigger a rebuild.
+		if self.registry ~= nil then
+			return
+		end
+		self.registry = {}
+		self.fitScaleCache = {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ResolveFitScale(table data, Entity entity)
+		-- Board pieces share one sizing rule (BoardConfig single source): scale every sprite so its
+		-- visible height fills the cell's target band, instead of per-model hand-tuned magic scales.
+		-- Derived once per typeId from the body sprite's native height; data.scale (>0) stays an explicit
+		-- override path for variants like mushmom_split that intentionally deviate.
+		if self.fitScaleCache == nil then
+			self.fitScaleCache = {}
+		end
+		local cached = self.fitScaleCache[data.typeId]
+		if cached ~= nil then
+			return cached
+		end
+		local nativeHeight = 0
+		local renderer = entity.SpriteRendererComponent
+		if isvalid(renderer) and renderer.SpriteRUID ~= "" then
+			-- Board pieces use a static body sprite (not an animationclip) so the multi-layer
+			-- clip shadow does not collapse into a blob. Read native height from the Sprite directly;
+			-- fall back to the animationclip path for any RUID that is still a clip.
+			local sprite = _ResourceService:LoadSpriteAndWait(renderer.SpriteRUID)
+			if not isvalid(sprite) then
+				local clip = _ResourceService:LoadAnimationClipAndWait(renderer.SpriteRUID)
+				if isvalid(clip) and clip.Frames.Count > 0 then
+					sprite = clip.Frames[1].FrameSprite
+				end
+			end
+			if isvalid(sprite) and sprite.PixelPerUnit > 0 then
+				nativeHeight = sprite.Height / sprite.PixelPerUnit
+			end
+		end
+		local fit = _BoardConfig:ComputeFitScale(nativeHeight, data.isBoss)
+		self.fitScaleCache[data.typeId] = fit
+		log("[MonsterLogic] fit scale resolved: " .. data.typeId .. " nativeH=" .. nativeHeight .. " scale=" .. fit)
+		return fit
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetupShadow(Entity entity, number bodyScale)
+		-- Flat neutral drop shadow so the piece reads as separated from the board (no green tint, alpha 0.28).
+		-- The shadow child inherits the body fit scale, which varies per monster; counter-scale it by 1/bodyScale
+		-- so its world footprint stays constant (~0.45u wide x 0.15u tall) regardless of monster size. The white
+		-- circle sprite is 1.0u native, so world size = childLocalScale (after the parent-scale cancels out).
+		if bodyScale <= 0 then
+			return
+		end
+		local shadow = entity:GetChildByName("Shadow", false)
+		if not isvalid(shadow) then
+			return
+		end
+		local renderer = shadow.SpriteRendererComponent
+		if isvalid(renderer) then
+			renderer.Color = Color(0, 0, 0, _BoardConfig.SHADOW_ALPHA)
+		end
+		local t = shadow.TransformComponent
+		if isvalid(t) then
+			t.Scale = Vector3(0.45 / bodyScale, 0.15 / bodyScale, 1)
+			-- Counter-scale the local offset too so the shadow sits a constant ~0.02u under the feet in
+			-- world space (child-local Y is multiplied by the parent body scale). z just below the body.
+			t.Position = Vector3(0, -0.02 / bodyScale, 0.01 / bodyScale)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Subscribes to the game bus for per-stage modifier loading (passive consumer, C-18).
+		-- OnInitialize ordering across @Logic instances is not guaranteed, so re-assert the registry first.
+		self:EnsureBuilt()
+		log("[MonsterLogic] OnBeginPlay")
+		self.stageStartedEventHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Releases the bus subscription taken in OnBeginPlay.
+		if self.stageStartedEventHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedEventHandler)
+			self.stageStartedEventHandler = nil
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageStarted(StageStartedEvent event)
+		-- Caches stage modifiers (evolveZen/golemSplitRate) from the stage catalog single source (C-6/C-7).
+		self.currentStageId = event.stageId
+		local cfg = _StageCatalogLogic:GetStageConfig(event.stageId)
+		if cfg ~= nil then
+			self.stageModifiers = cfg.modifiers
+		else
+			self.stageModifiers = nil
+		end
+		log("[MonsterLogic] stage config loaded: " .. event.stageId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetMapEntity()
+		-- SpawnByModelId parent must never be nil; a Logic has no self.Entity, so resolve by path.
+		if not isvalid(self.mapEntity) then
+			self.mapEntity = _EntityService:GetEntityByPath(_BoardConfig.MAP_ENTITY_PATH)
+		end
+		return self.mapEntity
+	end
+
+	@ExecSpace("ServerOnly")
+	method string SpawnMonster(string typeId, integer col, integer row)
+		-- Public spawn entry (callers: WaveLogic/BossLogic, C-3). Returns monsterId or "" on failure.
+		self:EnsureBuilt()
+		local data = _MonsterBalance:GetTypeData(typeId)
+		if data == nil then
+			log_error("[MonsterLogic] spawn failed: unknown typeId " .. typeId)
+			return ""
+		end
+		self.idCounter = self.idCounter + 1
+		local monsterId = "mon_" .. self.idCounter
+		local kind = "monster"
+		if data.isBoss then
+			kind = "boss"
+		end
+		if not _BoardLogic:TryOccupy(col, row, monsterId, kind) then
+			log_error("[MonsterLogic] spawn failed: cell occupied (" .. col .. "," .. row .. ") typeId=" .. typeId)
+			return ""
+		end
+		if not self:SpawnInternal(monsterId, typeId, col, row) then
+			_BoardLogic:Release(col, row, monsterId)
+			return ""
+		end
+		return monsterId
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean SpawnInternal(string monsterId, string typeId, integer col, integer row)
+		-- Shared spawn body (no occupancy handling): entity + registry + unit sync init.
+		self:EnsureBuilt()
+		local data = _MonsterBalance:GetTypeData(typeId)
+		local parent = self:GetMapEntity()
+		if not isvalid(parent) then
+			log_error("[MonsterLogic] spawn failed: map entity not found")
+			return false
+		end
+		local pos = _BoardConfig:ApplyCellFitOffset(_BoardLogic:CellToWorld(col, row))
+		local entity = _SpawnService:SpawnByModelId(data.modelId, typeId .. "_" .. monsterId, pos, parent)
+		if not isvalid(entity) then
+			log_error("[MonsterLogic] spawn failed: SpawnByModelId nil for modelId=" .. data.modelId)
+			return false
+		end
+		-- Pseudo-depth: lower rows render in front (single source: BoardConfig, MASTER_PLAN §5.1).
+		local renderer = entity.SpriteRendererComponent
+		if isvalid(renderer) then
+			renderer.SortingLayer = _BoardConfig.BOARD_SORTING_LAYER
+			renderer.OrderInLayer = _BoardConfig:GetOrderInLayer(row)
+		end
+		-- Uniform board fit: derive scale from the sprite's native height so every piece reads at the
+		-- same in-cell size (no per-model magic scale). data.scale (>0) is an explicit override factor
+		-- on top of the fit, used by variants like mushmom_split that intentionally deviate.
+		local fitScale = self:ResolveFitScale(data, entity)
+		if data.scale > 0 then
+			fitScale = fitScale * data.scale
+		end
+		entity.TransformComponent.Scale = Vector3(fitScale, fitScale, 1)
+		self:SetupShadow(entity, fitScale)
+		---@type MonsterUnit
+		local unit = entity:GetComponent("script.MonsterUnit")
+		if unit ~= nil then
+			-- IsBoss MUST sync before MaxHp: the client gates AttachHpBar on MaxHp>0, then branches on
+			-- IsBoss to pick the dedicated boss bar. Writing MaxHp first lets the client attach a normal
+			-- bar to a boss when IsBoss arrives late (race). Set the bar-routing flag first.
+			unit.IsBoss = data.isBoss
+			-- Sentinel maxHp == 0 means the caller injects HP right after spawn (SetMonsterHp).
+			-- Skip the initial HP @Sync write so the client bar gates on the real value (no 1 -> N flicker).
+			if data.maxHp > 0 then
+				unit.MaxHp = data.maxHp
+				unit.Hp = data.maxHp
+			end
+		end
+		local spawnZen = _WaveLogic.CurrentZen
+		self.registry[monsterId] = {
+			monsterId = monsterId,
+			typeId = typeId,
+			col = col,
+			row = row,
+			hp = data.maxHp,
+			maxHp = data.maxHp,
+			exp = data.exp,
+			isBoss = data.isBoss,
+			isDead = false,
+			spawnZen = spawnZen,
+			agingRolled = false,
+			entity = entity,
+		}
+		log("[MonsterLogic] monster spawned: " .. typeId .. " at (" .. col .. "," .. row .. ") id=" .. monsterId .. " hp=" .. data.maxHp .. " zen=" .. spawnZen)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RelocateMonster(string monsterId, integer col, integer row)
+		-- Placement reroll (C-23): move an existing monster to a new cell — registry, entity
+		-- Transform, and pseudo-depth order all updated together. Board occupancy is the caller's job.
+		self:EnsureBuilt()
+		local m = self.registry[monsterId]
+		if m == nil or m.isDead then
+			return
+		end
+		m.col = col
+		m.row = row
+		if isvalid(m.entity) then
+			m.entity.TransformComponent.Position = _BoardConfig:ApplyCellFitOffset(_BoardLogic:CellToWorld(col, row))
+			local renderer = m.entity.SpriteRendererComponent
+			if isvalid(renderer) then
+				renderer.OrderInLayer = _BoardConfig:GetOrderInLayer(row)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyDamage(string monsterId, integer damage, string attackerUserId)
+		-- Single damage entry point (C-17). isDead guard keeps simultaneous kills idempotent.
+		self:EnsureBuilt()
+		local m = self.registry[monsterId]
+		if m == nil or m.isDead then
+			return
+		end
+		m.hp = math.max(0, m.hp - damage)
+		self:SyncUnitHp(m)
+		log("[MonsterLogic] ApplyDamage: " .. m.typeId .. " id=" .. monsterId .. " dmg=" .. damage .. " hp=" .. m.hp .. "/" .. m.maxHp)
+		if m.hp > 0 then
+			return
+		end
+		self:ProcessKill(m, attackerUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ProcessKill(table m, string attackerUserId)
+		-- Kill flow per MASTER_PLAN §1.3: release cell, roll drops, emit event, delayed destroy.
+		m.isDead = true
+		self:SyncUnitDead(m)
+		_BoardLogic:Release(m.col, m.row, m.monsterId)
+		local drops = self:RollDrops(m.typeId)
+		if m.isBoss then
+			-- Boss body emits BossKilledEvent only, via BossLogic (§3 registry).
+			_BossLogic:OnBossKilled(m.monsterId, attackerUserId, drops)
+		else
+			local ev = MonsterKilledEvent()
+			ev.monsterId = m.monsterId
+			ev.typeId = m.typeId
+			ev.col = m.col
+			ev.row = m.row
+			ev.attackerUserId = attackerUserId
+			ev.exp = m.exp
+			ev.isBoss = false
+			ev.drops = drops
+			_ZengardGameLogic:SendGameEvent(ev)
+		end
+		log("[MonsterLogic] monster killed: " .. m.typeId .. " id=" .. m.monsterId .. " by " .. attackerUserId .. " exp=" .. m.exp .. " drops=" .. #drops)
+		self:DestroyAfterDissolve(m)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table RollDrops(string typeId)
+		-- Drop roll per MonsterBalance §7.7; boss uses the exclusive meso/redMeso roll (C-32).
+		local drops = {}
+		local data = _MonsterBalance:GetTypeData(typeId)
+		if data == nil then
+			return drops
+		end
+		if data.isBoss then
+			if _UtilLogic:RandomDouble() < _MonsterBalance.BOSS_DROP_RED_MESO_PROB then
+				table.insert(drops, { itemId = "redMeso", count = _MonsterBalance.BOSS_DROP_RED_MESO_AMOUNT })
+			else
+				table.insert(drops, { itemId = "meso", count = _MonsterBalance.BOSS_DROP_MESO_AMOUNT })
+			end
+			return drops
+		end
+		for _, d in ipairs(data.drops) do
+			if _UtilLogic:RandomDouble() < d.chance then
+				table.insert(drops, { itemId = d.itemId, count = d.count })
+			end
+		end
+		return drops
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnZenAging(integer zenIndex)
+		-- §1.2 step 2: age existing units (spawnZen differential), one-time evolve/multiply rolls,
+		-- then delegate the boss tick. Caller: WaveLogic only.
+		self:EnsureBuilt()
+		log("[MonsterLogic] zen aging: zen=" .. zenIndex)
+		local threshold = _MonsterBalance.EVOLVE_MULTIPLY_ZEN_AGE
+		local golemMul = 1.0
+		if self.stageModifiers ~= nil then
+			if self.stageModifiers.evolveZen ~= nil then
+				threshold = self.stageModifiers.evolveZen
+			end
+			if self.stageModifiers.golemSplitRate ~= nil then
+				golemMul = self.stageModifiers.golemSplitRate
+			end
+		end
+		-- Snapshot first: Multiply/Evolve insert registry keys, which is illegal mid-pairs.
+		local candidates = {}
+		for _, m in pairs(self.registry) do
+			if not m.isDead and not m.isBoss and not m.agingRolled then
+				if (zenIndex - m.spawnZen) >= threshold then
+					table.insert(candidates, m)
+				end
+			end
+		end
+		for _, m in ipairs(candidates) do
+			m.agingRolled = true
+			local data = _MonsterBalance:GetTypeData(m.typeId)
+			if data ~= nil then
+				if data.agingAction == "evolve" then
+					if _UtilLogic:RandomDouble() < _MonsterBalance.EVOLVE_PROB then
+						self:Evolve(m)
+					end
+				elseif data.agingAction == "multiply" then
+					local prob = math.min(1, _MonsterBalance.MULTIPLY_PROB * golemMul)
+					if _UtilLogic:RandomDouble() < prob then
+						self:Multiply(m)
+					end
+				end
+			end
+		end
+		if _BossLogic:IsBossAlive() then
+			_BossLogic:OnBossZenTick(zenIndex)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Evolve(table m)
+		-- In-place replacement: occupancy is handed over, no kill event for the old unit (§8.4).
+		local data = _MonsterBalance:GetTypeData(m.typeId)
+		local newTypeId = data.evolveTo
+		m.isDead = true
+		self:SyncUnitDead(m)
+		self:DestroyAfterDissolve(m)
+		self.idCounter = self.idCounter + 1
+		local newId = "mon_" .. self.idCounter
+		_BoardLogic:ReplaceOccupant(m.col, m.row, m.monsterId, newId)
+		if not self:SpawnInternal(newId, newTypeId, m.col, m.row) then
+			_BoardLogic:Release(m.col, m.row, newId)
+			return
+		end
+		local ev = MonsterEvolvedEvent()
+		ev.oldMonsterId = m.monsterId
+		ev.newMonsterId = newId
+		ev.newTypeId = newTypeId
+		ev.col = m.col
+		ev.row = m.row
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[MonsterLogic] monster evolved: " .. m.monsterId .. " -> " .. newId .. " (" .. newTypeId .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Multiply(table m)
+		-- Adjacent empty cell first, whole-board fallback, skip when full (§8.4, D15).
+		local cell = self:PickAdjacentFirstEmptyCell(m.col, m.row)
+		if cell == nil then
+			log("[MonsterLogic] multiply skipped: board full")
+			return
+		end
+		local newId = self:SpawnMonster(m.typeId, cell.col, cell.row)
+		if newId ~= "" then
+			log("[MonsterLogic] monster multiplied: " .. m.typeId .. " " .. m.monsterId .. " -> " .. newId .. " at (" .. cell.col .. "," .. cell.row .. ")")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table PickAdjacentFirstEmptyCell(integer col, integer row)
+		-- Shared cell picker for multiply/split: adjacent first, then any empty cell, else nil.
+		local cells = _BoardLogic:GetAdjacentEmptyCells(col, row)
+		if cells ~= nil and #cells > 0 then
+			return cells[_UtilLogic:RandomIntegerRange(1, #cells)]
+		end
+		local fallback = _BoardLogic:GetRandomEmptyCells(1)
+		if fallback ~= nil and #fallback > 0 then
+			return fallback[1]
+		end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void HealMonster(string monsterId, number amount)
+		-- System-internal (caller: BossLogic heal pattern). Clamped to maxHp.
+		self:EnsureBuilt()
+		local m = self.registry[monsterId]
+		if m == nil or m.isDead then
+			return
+		end
+		m.hp = math.min(m.maxHp, m.hp + amount)
+		self:SyncUnitHp(m)
+		log("[MonsterLogic] monster healed: " .. m.typeId .. " id=" .. monsterId .. " hp=" .. m.hp .. "/" .. m.maxHp)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetMonsterHp(string monsterId, number hp, number maxHp)
+		-- System-internal (caller: BossLogic split). maxHp <= 0 keeps the current maxHp.
+		self:EnsureBuilt()
+		local m = self.registry[monsterId]
+		if m == nil or m.isDead then
+			return
+		end
+		if maxHp > 0 then
+			m.maxHp = maxHp
+		end
+		m.hp = math.max(0, math.min(m.maxHp, hp))
+		local unit = self:GetUnit(m)
+		if unit ~= nil then
+			unit.MaxHp = m.maxHp
+			unit.Hp = m.hp
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetMonsterAt(integer col, integer row)
+		-- C-16: registry owner answers cell queries. nil when no living monster occupies the cell.
+		self:EnsureBuilt()
+		for _, m in pairs(self.registry) do
+			if not m.isDead and m.col == col and m.row == row then
+				return self:ToInfo(m)
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetMonsterInfo(string monsterId)
+		-- Snapshot of one registry entry (nil for unknown ids).
+		self:EnsureBuilt()
+		local m = self.registry[monsterId]
+		if m == nil then
+			return nil
+		end
+		return self:ToInfo(m)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetAliveMonsters()
+		-- Targeting/range queries (caller: CombatLogic).
+		self:EnsureBuilt()
+		local list = {}
+		for _, m in pairs(self.registry) do
+			if not m.isDead then
+				table.insert(list, self:ToInfo(m))
+			end
+		end
+		return list
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetAliveMonsterCount()
+		-- Fail-threshold input (caller: WaveLogic, §1.2 step 5/7).
+		self:EnsureBuilt()
+		local count = 0
+		for _, m in pairs(self.registry) do
+			if not m.isDead then
+				count = count + 1
+			end
+		end
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForStage()
+		-- §1.1 step 2: destroy leftover entities and wipe run state (a @Logic survives map life, E8).
+		self:EnsureBuilt()
+		for _, m in pairs(self.registry) do
+			if isvalid(m.entity) then
+				m.entity:Destroy()
+			end
+		end
+		self.registry = {}
+		self.stageModifiers = nil
+		self.currentStageId = ""
+		_BossLogic:ResetForStage()
+		log("[MonsterLogic] reset for stage")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SyncUnitHp(table m)
+		-- Pushes registry HP into the @Sync property feeding the client HP bar (C-8).
+		local unit = self:GetUnit(m)
+		if unit ~= nil then
+			unit.Hp = m.hp
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SyncUnitDead(table m)
+		-- Flags the unit dead so clients run the out-dissolve.
+		local unit = self:GetUnit(m)
+		if unit ~= nil then
+			unit.IsDead = true
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method MonsterUnit GetUnit(table m)
+		-- Resolves the display component on the monster entity (nil-safe).
+		if not isvalid(m.entity) then
+			return nil
+		end
+		---@type MonsterUnit
+		local unit = m.entity:GetComponent("script.MonsterUnit")
+		return unit
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DestroyAfterDissolve(table m)
+		-- Keeps the entity alive long enough for the client out-dissolve (§8.3).
+		if isvalid(m.entity) then
+			m.entity:Destroy(_MonsterBalance.DISSOLVE_DURATION + _MonsterBalance.DESTROY_DELAY_PADDING)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table ToInfo(table m)
+		-- Read-only snapshot exposed to other systems (GetMonsterAt schema, §4.3).
+		return {
+			monsterId = m.monsterId,
+			typeId = m.typeId,
+			hp = m.hp,
+			maxHp = m.maxHp,
+			isBoss = m.isBoss,
+			isDead = m.isDead,
+			col = m.col,
+			row = m.row,
+			spawnZen = m.spawnZen,
+		}
+	end
+
+end

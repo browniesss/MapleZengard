@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://5f14e82ede2448d29d61d7d0879b3193",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://5f14e82ede2448d29d61d7d0879b3193",
+      "name": "Bm",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}

@@ -1,0 +1,407 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UIHpBarManagerLogic extends Logic
+
+	-- Single HP bar implementation (C-8): screen-mode pooled bars for every monster, including the boss.
+	-- The boss flows through the same pooled path (Attach/activeBars/SyncBarPositions) at a larger scale;
+	-- the dedicated bossBarRoot/bossFill subtree is kept hidden because it never rendered (.ui issue).
+	-- Callers: MonsterUnit (client) via the §4.9 API — Attach / UpdateHp / Release / AttachBoss.
+
+	-- UI bindings: UUIDs injected by UIBuilder write(bind).
+	property Entity rootGroup = "a154a4f0-df00-47a4-af1a-f33ba4112872"
+
+	property Entity barTemplate = "06947673-cf49-4f48-abdf-f123a9c7f927"
+
+	property Entity bossBarRoot = "c294f5bd-6127-41e9-b7d0-a906df8307ed"
+
+	property SpriteGUIRendererComponent bossFill = "afa06200-bfaf-480f-a2c5-020803116d8d"
+
+	-- MASTER_PLAN §7.11 UI constants.
+	property integer HPBAR_POOL_SIZE = 60
+
+	-- Monsters are bottom-pivot (WorldPosition == foot point); the visible body spans ~0.72u upward.
+	-- A bar at +0.42 sat over the upper body / center and obscured the monster (user: "bar at center").
+	-- +0.08 places the bar just above the feet so it reads at the monster's BOTTOM (user request #8).
+	property number HPBAR_OFFSET_Y = 0.08
+
+	-- Runtime scale for cloned bars. The 100x16 template at 1.5x (150px) overhung the ~72px
+	-- fit-scaled monsters ("bar too big"); 0.9x (~90px) sits cleanly just over the monster head.
+	-- SyncBarPositions only writes anchoredPosition, so UIScale never conflicts with tracking.
+	property Vector3 HPBAR_SCALE = Vector3(0.9, 0.9, 1)
+
+	-- Boss reuses the verified pooled-bar render path (Attach/activeBars/SyncBarPositions) instead of
+	-- the dedicated bossBarRoot subtree, which never rendered (.ui dual-anchor conflict). The pooled bar
+	-- is scaled up ~2.2x so the boss reads as a major target; restored to HPBAR_SCALE on release so the
+	-- next monster reusing the pooled clone is never stuck at boss size.
+	property Vector3 BOSS_BAR_SCALE = Vector3(2.2, 2.2, 1)
+
+	-- Boss bar also moved to the bottom for consistency (user #8). Boss sprite is taller (~1.0u) and
+	-- the bar is 2.2x, so +0.15 keeps it in the lower portion without diving under the foot shadow.
+	property number BOSS_OFFSET_Y = 0.15
+
+	-- BINARY threshold (>0.30 green / <=0.30 red): the 3-tier green/yellow/red was unresolvable
+	-- at low-HP close-up downscale, so a single green<->red flip is the visual ground truth.
+	property number HP_RATIO_LOW = 0.30
+
+	-- Off-screen park position for released/full-HP bars so a stray clone can never
+	-- render over the board (the prior "black blob" regression). Far outside the 1920x1080 canvas.
+	property Vector2 PARK_POSITION = Vector2(-9000, -9000)
+
+	-- Runtime brightness fallback for the cloned bar root background. The BarTemplate root renderer
+	-- ships a dark track (Color 0.12/0.12/0.14, a0.85) that sits one OrderInLayer BELOW the green Fill.
+	-- At close-up downscale that dark surround dominated the pixel average so green never read as
+	-- green ("green not visible"). Recoloring the root to a light, low-alpha track guarantees the
+	-- backdrop can never darken the green Fill on top, independent of any .ui anchor/size fix.
+	property Color BAR_TRACK_COLOR = Color(0.82, 0.86, 0.92, 0.35)
+
+	property table activeBars = {}
+
+	property table barPool = {}
+
+	property integer createdCount = 0
+
+	property integer syncTimerId = 0
+
+	property string bossTargetId = ""
+
+	property number bossMaxHp = 0
+
+	property table busHandlers = {}
+
+	property boolean wired = false
+
+	-- Modal occlusion state (Member A's UIRouterLogic:ApplyModalHudOcclusion drives this).
+	-- modalOccluded is the false->true edge guard so a double-true never overwrites the snapshot;
+	-- modalSavedShown is the rootGroup Enable state captured at the moment the modal opened, so close
+	-- restores EXACTLY that (stays hidden if no bars were live / the group was already hidden).
+	property boolean modalOccluded = false
+
+	property boolean modalSavedShown = false
+
+	method void OnBeginPlay()
+		-- Starts the 1/60 World→Screen sync loop; pool entities are cloned lazily from the template.
+		-- Template/boss-bar hide is deferred to TryWire: WorldHpBarGroup is DefaultShow=false so its
+		-- children aren't instantiated at OnBeginPlay (C-21).
+		log("[UIHpBarManagerLogic] OnBeginPlay pool=" .. self.HPBAR_POOL_SIZE)
+		self.syncTimerId = _TimerService:SetTimerRepeat(self.SyncBarPositions, 1 / 60)
+		self:SubscribeGameEvent(StageStartedEvent, self.OnStageStarted)
+		self:SubscribeGameEvent(StageEndedEvent, self.OnStageEnded)
+	end
+
+	method void OnUpdate(number delta)
+		-- Defers child-entity init until WorldHpBarGroup's subtree is instantiated.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+	end
+
+	method boolean TryWire()
+		-- One-shot: hide the pooled-bar template and the dedicated boss bar once both are valid.
+		if not isvalid(self.barTemplate) or not isvalid(self.bossBarRoot) then
+			return false
+		end
+		self.barTemplate.Enable = false
+		self.bossBarRoot.Enable = false
+		log("[UIHpBarManagerLogic] wired")
+		return true
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of the timer and bus subscriptions taken in OnBeginPlay.
+		if self.syncTimerId ~= 0 then
+			_TimerService:ClearTimer(self.syncTimerId)
+			self.syncTimerId = 0
+		end
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+	end
+
+	method void SubscribeGameEvent(any eventType, any callback)
+		-- Bus subscription via the single world event bus (§3); handlers tracked for OnEndPlay.
+		local busHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
+		table.insert(self.busHandlers, { evType = eventType, evHandler = busHandler })
+	end
+
+	method void OnStageStarted(StageStartedEvent event)
+		-- WorldHpBarGroup is not a router-managed main screen, so this controller owns its visibility.
+		-- The event can land before rootGroup is instantiated, so guard it (LEA-2007).
+		if not isvalid(self.rootGroup) then
+			log("[UIHpBarManagerLogic] stage started before rootGroup ready")
+			return
+		end
+		self.rootGroup.Enable = true
+		if not self.wired then
+			-- Enabling the group instantiates the subtree, so the template hide can run now instead of
+			-- waiting a frame — prevents the raw template flashing on screen.
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+		log("[UIHpBarManagerLogic] hp bar group shown")
+	end
+
+	method void OnStageEnded(StageEndedEvent event)
+		-- Stage teardown: every bar returns to the pool before the group hides.
+		self:ReleaseAll()
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		log("[UIHpBarManagerLogic] hp bar group hidden")
+	end
+
+	method void SetModalOccluded(boolean occluded)
+		-- State-preserving visibility toggle called by UIRouterLogic:ApplyModalHudOcclusion when a modal
+		-- (choice / result / job / companion / interior popup) opens or closes over the board. It ONLY
+		-- flips the WorldHpBarGroup root Enable; it never Releases bars, so monster HP tracking
+		-- (SyncBarPositions / activeBars) keeps running and renders nothing while the modal is up.
+		if occluded then
+			-- Capture only on the false->true edge; a double-true must not overwrite the snapshot.
+			if not self.modalOccluded then
+				self.modalSavedShown = isvalid(self.rootGroup) and self.rootGroup.Enable
+				self.modalOccluded = true
+				if isvalid(self.rootGroup) then
+					self.rootGroup.Enable = false
+				end
+			end
+			log("[UIHpBarManager] modalOccluded=true restoredShown=" .. tostring(self.modalSavedShown))
+		else
+			-- Restore EXACTLY the captured state; never blanket-enable. A double-false is a no-op.
+			if self.modalOccluded then
+				self.modalOccluded = false
+				if isvalid(self.rootGroup) then
+					self.rootGroup.Enable = self.modalSavedShown
+				end
+			end
+			log("[UIHpBarManager] modalOccluded=false restoredShown=" .. tostring(self.modalSavedShown))
+		end
+	end
+
+	method void Attach(Entity monster, number maxHp)
+		-- §4.9 client API: pooled bar for normal monsters. Pool exhaustion is ignored with a log (E7).
+		if not isvalid(monster) then
+			return
+		end
+		local entityId = monster.Id
+		local rec = self.activeBars[entityId]
+		if rec ~= nil then
+			rec.maxHp = maxHp
+			return
+		end
+		local bar = self:AcquireBar()
+		if bar == nil then
+			log_warning("[UIHpBarManagerLogic] pool exhausted; attach ignored")
+			return
+		end
+		local fillEntity = bar:GetChildByName("Fill", false)
+		rec = { bar = bar, fill = fillEntity.SpriteGUIRendererComponent, target = monster, maxHp = maxHp }
+		self.activeBars[entityId] = rec
+		self:ApplyHp(rec, maxHp)
+		log("[UIHpBarManagerLogic] hp bar attached: " .. monster.Name)
+	end
+
+	method void UpdateHp(Entity monster, number currentHp)
+		-- §4.9 client API. Silently no-ops when the bar was already released (E8). Boss and normal
+		-- monsters share the same pooled path: both live in activeBars and update via ApplyHp.
+		if not isvalid(monster) then
+			return
+		end
+		local rec = self.activeBars[monster.Id]
+		if rec == nil then
+			return
+		end
+		self:ApplyHp(rec, currentHp)
+	end
+
+	method void Release(Entity monster)
+		-- §4.9 client API; invalid entities are reclaimed by the sync loop instead.
+		if not isvalid(monster) then
+			return
+		end
+		self:ReleaseById(monster.Id)
+	end
+
+	method void AttachBoss(Entity boss, number maxHp)
+		-- §4.9 client API: the boss reuses the verified POOLED bar path (Attach -> activeBars ->
+		-- SyncBarPositions head-tracking) instead of the dedicated bossBarRoot subtree, which never
+		-- rendered. The pooled bar is upscaled to BOSS_BAR_SCALE and force-shown at full HP.
+		if not isvalid(boss) then
+			return
+		end
+		self.bossTargetId = boss.Id
+		self.bossMaxHp = maxHp
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = true
+		end
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+		self:Attach(boss, maxHp)
+		local rec = self.activeBars[boss.Id]
+		if rec == nil then
+			log_warning("[UIHpBarManagerLogic] pooled boss bar acquire failed; boss has no bar")
+			return
+		end
+		rec.isBoss = true
+		if isvalid(rec.bar) and isvalid(rec.bar.UITransformComponent) then
+			rec.bar.UITransformComponent.UIScale = self.BOSS_BAR_SCALE
+		end
+		-- Re-apply HP now that isBoss is set: the Attach call above ran ApplyHp before isBoss existed,
+		-- so it hid the bar at full HP. With isBoss the boss bar always shows.
+		self:ApplyHp(rec, maxHp)
+		log("[UIHpBarManagerLogic] boss bar attached (pooled) maxHp=" .. maxHp)
+	end
+
+	method Entity AcquireBar()
+		-- Pool pop first; lazy clone until HPBAR_POOL_SIZE, then nil (caller logs E7).
+		local poolCount = #self.barPool
+		if poolCount > 0 then
+			local bar = self.barPool[poolCount]
+			table.remove(self.barPool, poolCount)
+			return bar
+		end
+		if self.createdCount >= self.HPBAR_POOL_SIZE then
+			return nil
+		end
+		if not isvalid(self.barTemplate) then
+			return nil
+		end
+		self.createdCount += 1
+		local bar = self.barTemplate:Clone("HpBar_" .. self.createdCount)
+		-- Belt-and-suspenders: force the clone back under rootGroup. Clone inherits the template's
+		-- parent, but a stray clone parented to the canvas root rendered as the "black blob" over the
+		-- board; AttachTo guarantees it lives inside the managed (parkable / hideable) group.
+		if isvalid(bar) and isvalid(self.rootGroup) then
+			bar:AttachTo(self.rootGroup)
+		end
+		-- Upscale the clone once so the bar is legible at WorldUI distance (size+sorting fix).
+		if isvalid(bar) and isvalid(bar.UITransformComponent) then
+			bar.UITransformComponent.UIScale = self.HPBAR_SCALE
+		end
+		-- Brightness fallback: recolor the dark root track so it can never darken the green Fill child
+		-- (Fill is OrderInLayer 101, root 100). read-before-set so the swap is visible in logs.
+		local rootRenderer = bar.SpriteGUIRendererComponent
+		if isvalid(rootRenderer) then
+			local prev = rootRenderer.Color
+			rootRenderer.Color = self.BAR_TRACK_COLOR
+			log("[UIHpBarManager] bar track recolored from (" .. prev.r .. "," .. prev.g .. "," .. prev.b .. "," .. prev.a .. ") to track")
+		end
+		return bar
+	end
+
+	method void ReleaseById(string entityId)
+		-- Internal release path shared by Release / sync-loop reclaim / stage teardown. Boss and normal
+		-- monsters share one path now: clear boss state if this was the boss, then return the pooled bar.
+		local rec = self.activeBars[entityId]
+		if rec == nil then
+			return
+		end
+		if entityId == self.bossTargetId then
+			self.bossTargetId = ""
+			self.bossMaxHp = 0
+		end
+		self.activeBars[entityId] = nil
+		if isvalid(rec.bar) then
+			rec.bar.Enable = false
+			rec.bar.UITransformComponent.anchoredPosition = self.PARK_POSITION
+			-- Restore the normal scale so a pooled clone last used by the boss (2.2x) never comes back
+			-- to a normal monster oversized. AcquireBar only re-scales freshly cloned bars, not pool pops.
+			rec.bar.UITransformComponent.UIScale = self.HPBAR_SCALE
+			table.insert(self.barPool, rec.bar)
+		end
+		log("[UIHpBarManagerLogic] hp bar released: " .. entityId)
+	end
+
+	method void ReleaseAll()
+		-- Snapshot ids first: ReleaseById mutates activeBars during iteration. The boss now lives in
+		-- activeBars too, so this single pass releases it as well (it resets bossTargetId on the way out).
+		local ids = {}
+		for entityId, _ in pairs(self.activeBars) do
+			table.insert(ids, entityId)
+		end
+		for _, entityId in ipairs(ids) do
+			self:ReleaseById(entityId)
+		end
+	end
+
+	method void ApplyHp(table rec, number currentHp)
+		-- Fill + threshold color in one place so Attach and UpdateHp stay consistent.
+		-- Normal monster bar is hidden at full HP to keep the board clean; it appears on first damage.
+		-- The boss bar is always shown (even at full HP) so the major target is always readable.
+		local ratio = 0
+		if rec.maxHp > 0 then
+			ratio = math.max(0, math.min(1, currentHp / rec.maxHp))
+		end
+		local hidden = ratio >= 1 and not rec.isBoss
+		-- At full HP (normal monster only), zero the fill too: if Enable=false ever fails to suppress
+		-- the child sprite, a zero-fill bar renders nothing instead of a full bar (black-blob guard).
+		rec.fill.FillAmount = hidden and 0 or ratio
+		rec.fill.Color = self:ColorForRatio(ratio)
+		if isvalid(rec.bar) then
+			rec.bar.Enable = not hidden
+			if hidden then
+				-- Park immediately instead of waiting for the next 1/60 sync tick, so a pooled clone
+				-- can never flash at the monster head between full-HP and the next SyncBarPositions pass.
+				rec.bar.UITransformComponent.anchoredPosition = self.PARK_POSITION
+			end
+		end
+	end
+
+	method Color ColorForRatio(number ratio)
+		-- BINARY: green above the threshold, red at/below it (see HP_RATIO_LOW).
+		if ratio > self.HP_RATIO_LOW then
+			return Color(0.20, 0.95, 0.30, 1)
+		end
+		return Color(0.85, 0.25, 0.22, 1)
+	end
+
+	method Vector2 GetBoardCameraOffset()
+		-- BoardCameraLogic shifts the pinned board view via the local player's CameraComponent.CameraOffset.
+		-- HP bars subtract it because WorldToScreenPosition ignores CameraOffset (bars would drift otherwise).
+		local player = _UserService.LocalPlayer
+		if isvalid(player) and isvalid(player.CameraComponent) then
+			return player.CameraComponent.CameraOffset
+		end
+		return Vector2(0, 0)
+	end
+
+	method void SyncBarPositions()
+		-- 1/60 repeat timer (spec §7.4): screen-space bars track above the monster head.
+		local staleIds = nil
+		for entityId, rec in pairs(self.activeBars) do
+			if isvalid(rec.target) and isvalid(rec.bar) then
+				if rec.bar.Enable then
+					-- Visible (damaged) bar: track the monster head in screen space.
+					-- WorldToScreenPosition already reflects the active camera (incl. BoardCameraLogic's
+					-- CameraOffset), so NO manual offset is applied — a prior CameraOffset subtraction
+					-- over-shifted every bar ~240px left of its monster ("HP bar in the wrong place").
+					local worldPos = rec.target.TransformComponent.WorldPosition
+					local offsetY = rec.isBoss and self.BOSS_OFFSET_Y or self.HPBAR_OFFSET_Y
+					local screenPos = _UILogic:WorldToScreenPosition(Vector2(worldPos.x, worldPos.y + offsetY))
+					rec.bar.UITransformComponent.anchoredPosition = _UILogic:ScreenToUIPosition(screenPos)
+				else
+					-- Full-HP (Enable=false) bar: park it off-canvas instead of pinning it to the head.
+					-- If Enable alone fails to suppress the child sprites, an over-head position would
+					-- render as the black blob; parking guarantees it stays out of the board view.
+					rec.bar.UITransformComponent.anchoredPosition = self.PARK_POSITION
+				end
+			else
+				if staleIds == nil then
+					staleIds = {}
+				end
+				table.insert(staleIds, entityId)
+			end
+		end
+		if staleIds ~= nil then
+			for _, entityId in ipairs(staleIds) do
+				self:ReleaseById(entityId)
+			end
+		end
+	end
+
+end

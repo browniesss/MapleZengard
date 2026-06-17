@@ -1,0 +1,200 @@
+@Logic
+script BoardLogic extends Logic
+
+	property table cells = {}
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Checkpoint log for the verify phase (ARCHITECTURE §4-9).
+		log("[BoardLogic] OnBeginPlay")
+		-- Board is world geometry; it must stay hidden until a stage starts so it never bleeds through Lobby/StageSelect UI.
+		self:SetBoardVisible(false)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetMapEntity()
+		-- Lazy cache: @Logic has no self.Entity, so the board map is resolved by path (spec §3 note).
+		if not isvalid(self._T.mapEntity) then
+			self._T.mapEntity = _EntityService:GetEntityByPath(_BoardConfig.MAP_ENTITY_PATH)
+		end
+		return self._T.mapEntity
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetBoardVisible(boolean visible)
+		-- Single visibility gate for the world board (cells + backdrop). Server toggles with sync so all clients match.
+		local map = self:GetMapEntity()
+		if not isvalid(map) then
+			log_warning("[BoardLogic] SetBoardVisible: map entity not found")
+			return
+		end
+		local shown = 0
+		for _, child in ipairs(map.Children:ToTable()) do
+			local name = child.Name
+			if name == "BoardBackdrop" or string.sub(name, 1, 5) == "Cell_" then
+				child:SetVisible(visible, false, true)
+				shown += 1
+			end
+		end
+		log("[BoardLogic] SetBoardVisible " .. tostring(visible) .. " count=" .. shown)
+	end
+
+	method string CellKey(integer col, integer row)
+		-- Internal occupancy key. Other systems must not rely on this format.
+		return col .. "_" .. row
+	end
+
+	method Vector3 CellToWorld(integer col, integer row)
+		-- Single source of cell->world conversion (MASTER_PLAN §4.1) — no system may compute its own.
+		local x = _BoardConfig.BOARD_CENTER_X + (col - (_BoardConfig.GRID_COLS - 1) / 2) * _BoardConfig.CELL_SIZE
+		local y = _BoardConfig.BOARD_CENTER_Y + (row - (_BoardConfig.GRID_ROWS - 1) / 2) * _BoardConfig.CELL_SIZE
+		return Vector3(x, y, 0)
+	end
+
+	method table WorldToCell(Vector3 pos)
+		-- Inverse of CellToWorld with rounding; nil outside the board.
+		local col = math.floor((pos.x - _BoardConfig.BOARD_CENTER_X) / _BoardConfig.CELL_SIZE + (_BoardConfig.GRID_COLS - 1) / 2 + 0.5)
+		local row = math.floor((pos.y - _BoardConfig.BOARD_CENTER_Y) / _BoardConfig.CELL_SIZE + (_BoardConfig.GRID_ROWS - 1) / 2 + 0.5)
+		if not self:IsInside(col, row) then
+			return nil
+		end
+		return { col = col, row = row }
+	end
+
+	method boolean IsInside(integer col, integer row)
+		-- Board bounds check for 0-based cell coordinates.
+		return col >= 0 and col < _BoardConfig.GRID_COLS and row >= 0 and row < _BoardConfig.GRID_ROWS
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsOccupied(integer col, integer row)
+		-- Server-authoritative occupancy query.
+		return self.cells[self:CellKey(col, row)] ~= nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TryOccupy(integer col, integer row, string occupantId, string kind)
+		-- Atomic claim of a cell; false when out of board or already taken.
+		if not self:IsInside(col, row) then
+			log_warning("[BoardLogic] TryOccupy out of board: " .. col .. "," .. row)
+			return false
+		end
+		local key = self:CellKey(col, row)
+		if self.cells[key] ~= nil then
+			return false
+		end
+		self.cells[key] = { occupantId = occupantId, occupantKind = kind }
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Release(integer col, integer row, string occupantId)
+		-- Id mismatch is silently ignored: a late kill event must not evict a newer occupant (spec §6-4).
+		local key = self:CellKey(col, row)
+		local cellData = self.cells[key]
+		if cellData == nil then
+			log_warning("[BoardLogic] Release on empty cell: " .. col .. "," .. row)
+			return
+		end
+		if cellData.occupantId ~= occupantId then
+			log_warning("[BoardLogic] Release id mismatch at " .. col .. "," .. row)
+			return
+		end
+		self.cells[key] = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReplaceOccupant(integer col, integer row, string oldId, string newId)
+		-- Keeps occupancy ids consistent across entity swaps such as evolution (spec §6-7).
+		local cellData = self.cells[self:CellKey(col, row)]
+		if cellData == nil or cellData.occupantId ~= oldId then
+			log_warning("[BoardLogic] ReplaceOccupant mismatch at " .. col .. "," .. row)
+			return
+		end
+		cellData.occupantId = newId
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetRandomEmptyCells(integer count)
+		-- Partial Fisher-Yates: only the first `count` slots need fixing (spec §5.1). May return fewer than asked.
+		local empty = {}
+		for col = 0, _BoardConfig.GRID_COLS - 1 do
+			for row = 0, _BoardConfig.GRID_ROWS - 1 do
+				if self.cells[self:CellKey(col, row)] == nil then
+					table.insert(empty, { col = col, row = row })
+				end
+			end
+		end
+		local n = math.min(count, #empty)
+		local result = {}
+		for i = 1, n do
+			local j = _UtilLogic:RandomIntegerRange(i, #empty)
+			empty[i], empty[j] = empty[j], empty[i]
+			table.insert(result, empty[i])
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetAdjacentEmptyCells(integer col, integer row)
+		-- 4-direction only, matching the game's no-diagonal direction vocabulary (§7.3).
+		local result = {}
+		local offsets = { { 0, 1 }, { 0, -1 }, { -1, 0 }, { 1, 0 } }
+		for _, offset in ipairs(offsets) do
+			local c = col + offset[1]
+			local r = row + offset[2]
+			if self:IsInside(c, r) and self.cells[self:CellKey(c, r)] == nil then
+				table.insert(result, { col = c, row = r })
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetEmptyCellNearestCenter()
+		-- Boss spawn cell (MASTER_PLAN §1.2-3): nearest empty cell to board center, random among ties.
+		local centerCol = (_BoardConfig.GRID_COLS - 1) / 2
+		local centerRow = (_BoardConfig.GRID_ROWS - 1) / 2
+		local bestDist = math.huge
+		local ties = {}
+		for col = 0, _BoardConfig.GRID_COLS - 1 do
+			for row = 0, _BoardConfig.GRID_ROWS - 1 do
+				if self.cells[self:CellKey(col, row)] == nil then
+					local dc = col - centerCol
+					local dr = row - centerRow
+					local dist = dc * dc + dr * dr
+					if dist < bestDist then
+						bestDist = dist
+						ties = { { col = col, row = row } }
+					elseif dist == bestDist then
+						table.insert(ties, { col = col, row = row })
+					end
+				end
+			end
+		end
+		if #ties == 0 then
+			return nil
+		end
+		return ties[_UtilLogic:RandomIntegerRange(1, #ties)]
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetOccupantCount(string kind)
+		-- Occupancy census by kind ("monster" | "player" | "boss" | "companion").
+		local count = 0
+		for _, cellData in pairs(self.cells) do
+			if cellData.occupantKind == kind then
+				count += 1
+			end
+		end
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetBoard()
+		-- The only reset path: @Logic survives map transitions, so stale occupancy must be cleared here (spec §6-12).
+		self.cells = {}
+		log("[BoardLogic] board reset")
+	end
+
+end

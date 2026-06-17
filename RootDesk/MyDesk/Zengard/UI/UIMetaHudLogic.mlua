@@ -1,0 +1,218 @@
+@Logic
+script UIMetaHudLogic extends Logic
+
+	-- Entity refs injected by UIBuilder bind (C-21) — ui/MetaHud.ui
+	property Entity rootGroup = "be6ceed4-d66c-48bd-ace5-8e7ce033d1be"
+
+	property Entity energyRow = "c5f881fa-7143-492f-83e2-d44448d0cd81"
+
+	property Entity refillText = "b6f0d609-8d40-4892-bc45-4ab1c07e1729"
+
+	property Entity mesoText = "53c03825-d927-4913-956a-903e271af3cd"
+
+	property Entity redMesoText = "8cb71ac4-0410-4ad5-aa97-3902e2216ea2"
+
+	property Entity lootText = "a8f96bc3-b8b6-4756-b048-a8994c1b5560"
+
+	property Entity rerollText = "0939d37a-72e0-46bd-baad-aab083b33eab"
+
+	property Entity btnGrowth = "f9cc2db7-8af4-474c-9964-73ac73a8c0a1"
+
+	-- ui-sound.md default UI SFX RUIDs
+	property string clickSfxRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSfxRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property any energyCells = nil
+
+	-- Last SyncMetaStatus snapshot reference (fresh table per push).
+	property any lastStatus = nil
+
+	-- Locally ticked refill countdown; re-anchored on every server push (server stays authoritative, E7).
+	property number refillRemaining = 0
+
+	property integer lastShownRefill = -1
+
+	-- Entity wiring is deferred to OnUpdate because client UI entities aren't valid in OnBeginPlay.
+	property boolean wired = false
+
+	property table busHandlers = {}
+
+	property table buttonHandlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Subscribes the meta bus events and requests the first sync; entity wiring waits for TryWire.
+		self.energyCells = {}
+		self:Subscribe(RerollUsedEvent, self.OnRerollUsed)
+		self:Subscribe(LootChangedEvent, self.OnLootChanged)
+		_PlayerDataLogic:RequestSyncMetaStatus()
+		log("[UIMetaHud] OnBeginPlay")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- One-shot entity wiring; returns false to retry next frame until the row and button are valid.
+		if not isvalid(self.energyRow) or not isvalid(self.btnGrowth) then
+			return false
+		end
+		for i = 1, _BmBalance.ENERGY_MAX do
+			table.insert(self.energyCells, self.energyRow:GetChildByName("Cell" .. tostring(i), false))
+		end
+		self:WireButton(self.btnGrowth, function() _UIMetaGrowthPopupLogic:Open() end)
+		log("[UIMetaHud] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Releases bus subscriptions and button handlers taken in OnBeginPlay.
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+		for _, rec in ipairs(self.buttonHandlers) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.buttonHandlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(any eventType, any callback)
+		-- Tracks a game-bus subscription so OnEndPlay can disconnect it.
+		local evHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
+		table.insert(self.busHandlers, { evType = eventType, evHandler = evHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity btnEntity, any onClick)
+		-- Centralizes click/hover SFX (ui-sound.md defaults) around the action callback.
+		if not isvalid(btnEntity) then
+			log_warning("[UIMetaHud] WireButton: invalid button entity")
+			return
+		end
+		local clickHandler = btnEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSfxRuid, 1.0)
+			if onClick ~= nil then
+				onClick()
+			end
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = btnEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSfxRuid, 0.6)
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Polls the client-side meta cache and ticks the refill countdown between server pushes.
+		if not self.wired then
+			if not self:TryWire() then
+				return
+			end
+			self.wired = true
+		end
+		local status = _PlayerDataLogic:GetClientMetaStatus()
+		if status ~= nil and status ~= self.lastStatus then
+			self.lastStatus = status
+			self.refillRemaining = status.nextRefillSec
+			self:ApplyStatus(status)
+		end
+		if self.lastStatus == nil or self.lastStatus.energy >= _BmBalance.ENERGY_MAX then
+			return
+		end
+		self.refillRemaining = self.refillRemaining - delta
+		local shown = math.ceil(self.refillRemaining)
+		if shown < 0 then
+			shown = 0
+		end
+		if shown ~= self.lastShownRefill then
+			self.lastShownRefill = shown
+			if isvalid(self.refillText) then
+				self.refillText.TextComponent.Text = "충전 " .. self:FormatSeconds(shown)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRerollUsed(RerollUsedEvent event)
+		-- Immediate counter feedback; the authoritative value follows via SyncMetaStatus.
+		if event.userId ~= self:GetLocalUserId() then
+			return
+		end
+		if isvalid(self.rerollText) then
+			self.rerollText.TextComponent.Text = "리롤 " .. tostring(event.remaining) .. "/" .. tostring(_BmBalance.REROLL_PER_STAGE_LIMIT)
+		end
+		log("[UIMetaHud] reroll used: kind=" .. event.kind .. " remaining=" .. tostring(event.remaining))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLootChanged(LootChangedEvent event)
+		-- Immediate loot counter feedback for drop rolls / spends.
+		if event.userId ~= self:GetLocalUserId() then
+			return
+		end
+		if isvalid(self.lootText) then
+			self.lootText.TextComponent.Text = "전리품 " .. tostring(event.amount)
+		end
+		log("[UIMetaHud] loot changed: " .. tostring(event.amount) .. " (" .. event.reason .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyStatus(table status)
+		-- Single render point for one SyncMetaStatus snapshot.
+		if isvalid(self.mesoText) then
+			self.mesoText.TextComponent.Text = tostring(status.meso)
+		end
+		if isvalid(self.redMesoText) then
+			self.redMesoText.TextComponent.Text = tostring(status.redMeso)
+		end
+		if isvalid(self.lootText) then
+			self.lootText.TextComponent.Text = "전리품 " .. tostring(status.lootCount)
+		end
+		if isvalid(self.rerollText) then
+			self.rerollText.TextComponent.Text = "리롤 " .. tostring(status.remainingRerolls) .. "/" .. tostring(_BmBalance.REROLL_PER_STAGE_LIMIT)
+		end
+		for i, cell in ipairs(self.energyCells) do
+			if isvalid(cell) then
+				if i <= status.energy then
+					-- Henesys green tint for filled cells (§5.2 visual rule).
+					cell.SpriteGUIRendererComponent.Color = Color(0.30, 0.85, 0.40, 1)
+				else
+					cell.SpriteGUIRendererComponent.Color = Color(0.16, 0.20, 0.17, 1)
+				end
+			end
+		end
+		if isvalid(self.refillText) then
+			if status.energy >= _BmBalance.ENERGY_MAX then
+				self.refillText.TextComponent.Text = "최대"
+			else
+				self.lastShownRefill = -1
+			end
+		end
+		log("[UIMetaHud] status applied: meso=" .. tostring(status.meso) .. " energy=" .. tostring(status.energy) .. " rerolls=" .. tostring(status.remainingRerolls))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatSeconds(integer sec)
+		-- mm:ss for the refill countdown.
+		if sec < 0 then
+			sec = 0
+		end
+		return string.format("%02d:%02d", math.floor(sec / 60), sec % 60)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetLocalUserId()
+		-- LocalPlayer is client-only and may be invalid during the first frames.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			return ""
+		end
+		return player.PlayerComponent.UserId
+	end
+
+end

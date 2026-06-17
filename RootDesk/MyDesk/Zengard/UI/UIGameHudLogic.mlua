@@ -1,0 +1,454 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UIGameHudLogic extends Logic
+
+	-- GameHUDGroup controller (MASTER_PLAN §2.2, C-21). No auto/manual toggle here (C-11).
+
+	-- UI bindings: UUIDs injected by UIBuilder write(bind), never drag-bound.
+	property TextComponent levelText = "913b7899-24d2-454d-8a28-2d7fd4032667"
+
+	property TextComponent jobText = "b3727296-b6a7-4329-a3d9-bddf5a19c1a6"
+
+	property SpriteGUIRendererComponent expFill = "9d55417f-a8b7-4856-a028-495ec1377a57"
+
+	property TextComponent waveText = "d8a8fa7f-f056-4fa9-90b2-a0549281e99f"
+
+	property Entity bossBanner = "35b8343f-a0bf-4077-b807-ec6b3644a4bf"
+
+	property TextComponent monsterText = "a005acc4-4f08-4591-ad6d-eb6737f855a9"
+
+	property TextComponent rerollText = "91ead065-6c1e-42fc-83ad-17cbb1a5ee44"
+
+	property TextComponent timerText = "19607dde-bb2a-4418-9df1-a98f1b8ea709"
+
+	property ButtonComponent zenButton = "4343fa71-1d73-44ae-a3f4-3531b8ce65ef"
+
+	property ButtonComponent rerollButton = "91ead065-6c1e-42fc-83ad-17cbb1a5ee44"
+
+	property SpriteGUIRendererComponent zenCooldownFill = "3ba8ac38-f00c-43ba-b696-77b6e32d9cd1"
+
+	property ButtonComponent exitButton = "2e80d375-03e0-464b-bb90-627f0a5ea47a"
+
+	property Entity exitConfirmPanel = "ac03525b-b386-4c53-91b5-dd207241fbcb"
+
+	property ButtonComponent exitYesButton = "01832cdd-3979-4edc-894c-09c2c915fd0c"
+
+	property ButtonComponent exitNoButton = "16479416-89a7-44f6-8673-51485ed2f2f9"
+
+	-- Spec §4.4: counter blinks red from bossZen-2 (18+), monster counter reddens at threshold-5 (35+).
+	property integer BOSS_IMMINENT_ZEN_OFFSET = 2
+
+	property integer MONSTER_WARN_MARGIN = 5
+
+	property number BLINK_INTERVAL = 0.4
+
+	property number BOSS_BANNER_DURATION = 2.5
+
+	-- ui-sound.md default UI SFX RUIDs (MASTER_PLAN §5.2).
+	property string CLICK_SFX_RUID = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string HOVER_SFX_RUID = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property number SFX_VOLUME = 1.0
+
+	property integer bossZen = 20
+
+	property integer failThreshold = 40
+
+	property string currentMode = ""
+
+	property boolean stageActive = false
+
+	property number cooldownLeft = 0
+
+	property number timeAttackElapsed = 0
+
+	property boolean timeAttackRunning = false
+
+	property boolean blinkActive = false
+
+	property number blinkElapsed = 0
+
+	property integer lastMonsterCount = -1
+
+	property integer bannerTimerId = 0
+
+	property table busHandlers = {}
+
+	property table uiHandlers = {}
+
+	property boolean wired = false
+
+	-- Latest HUD readouts captured while wiring is still pending, replayed by ApplyPending once wired.
+	property string pendingWaveText = ""
+
+	property string pendingJobText = ""
+
+	property string pendingLevelText = ""
+
+	property number pendingExpRatio = 0
+
+	method void OnBeginPlay()
+		-- Bus subscription is safe at OnBeginPlay (Logic singleton); entity wiring is deferred to TryWire
+		-- because GameHUDGroup is DefaultShow=false and its children aren't instantiated yet (C-21).
+		log("[UIGameHudLogic] OnBeginPlay")
+		self:SubscribeGameEvent(StageStartedEvent, self.OnStageStarted)
+		self:SubscribeGameEvent(StageEndedEvent, self.OnStageEnded)
+		self:SubscribeGameEvent(ZenStartedEvent, self.OnZenStarted)
+		self:SubscribeGameEvent(BossSpawnedEvent, self.OnBossSpawned)
+		self:SubscribeGameEvent(LevelUpEvent, self.OnLevelUp)
+		self:SubscribeGameEvent(JobSelectedEvent, self.OnJobSelected)
+		self:SubscribeGameEvent(RerollUsedEvent, self.OnRerollUsed)
+	end
+
+	method boolean TryWire()
+		-- One-shot entity wiring, retried each frame until every bound button is valid.
+		if not isvalid(self.zenButton) or not isvalid(self.exitButton) then
+			return false
+		end
+		if not isvalid(self.exitYesButton) or not isvalid(self.exitNoButton) then
+			return false
+		end
+		if not isvalid(self.rerollButton) then
+			return false
+		end
+		if isvalid(self.exitConfirmPanel) then
+			self.exitConfirmPanel.Enable = false
+		end
+		if isvalid(self.bossBanner) then
+			self.bossBanner.Enable = false
+		end
+		if isvalid(self.zenCooldownFill) then
+			self.zenCooldownFill.FillAmount = 0
+		end
+		self:WireButton(self.zenButton, self.OnZenClicked)
+		self:WireButton(self.rerollButton, self.OnRerollClicked)
+		self:WireButton(self.exitButton, self.OnExitClicked)
+		self:WireButton(self.exitYesButton, self.OnExitConfirmed)
+		self:WireButton(self.exitNoButton, self.OnExitCancelled)
+		self:ApplyPending()
+		log("[UIGameHudLogic] wired")
+		return true
+	end
+
+	method void ApplyPending()
+		-- Replays the latest readouts captured before wiring so events that fired pre-wire still show.
+		if isvalid(self.waveText) and self.pendingWaveText ~= "" then
+			self.waveText.Text = self.pendingWaveText
+		end
+		if isvalid(self.jobText) and self.pendingJobText ~= "" then
+			self.jobText.Text = self.pendingJobText
+		end
+		if isvalid(self.levelText) and self.pendingLevelText ~= "" then
+			self.levelText.Text = self.pendingLevelText
+		end
+		if isvalid(self.expFill) then
+			self.expFill.FillAmount = math.max(0, math.min(1, self.pendingExpRatio))
+		end
+		if self.stageActive then
+			self:SetMonsterCount(self.lastMonsterCount >= 0 and self.lastMonsterCount or 0)
+		end
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of everything connected in OnBeginPlay.
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+		for _, rec in ipairs(self.uiHandlers) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.uiHandlers = {}
+		if self.bannerTimerId ~= 0 then
+			_TimerService:ClearTimer(self.bannerTimerId)
+			self.bannerTimerId = 0
+		end
+	end
+
+	method void OnUpdate(number delta)
+		-- Drives cooldown overlay, sync-property polling, time-attack timer, and the boss-imminent blink.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+			return
+		end
+		if not isvalid(self.zenCooldownFill) then
+			return
+		end
+		if self.cooldownLeft > 0 then
+			self.cooldownLeft -= delta
+		end
+		-- The zen button stays usable through the boss phase (the boss fight is zen-driven), so the only
+		-- overlay is the per-zen cooldown sweep. (The old boss-phase full-dim was removed with the
+		-- WaveLogic IsZenAvailable freeze.)
+		local overlay = 0
+		if self.cooldownLeft > 0 then
+			overlay = self.cooldownLeft / _BoardConfig.ZEN_COOLDOWN_SECONDS
+		end
+		self.zenCooldownFill.FillAmount = overlay
+		if self.stageActive then
+			local monsterCount = _WaveLogic.MonsterCount
+			if monsterCount ~= self.lastMonsterCount then
+				self:SetMonsterCount(monsterCount)
+			end
+		end
+		if self.timeAttackRunning then
+			self.timeAttackElapsed += delta
+			self:UpdateTimerText()
+		end
+		if self.blinkActive and isvalid(self.waveText) then
+			self.blinkElapsed += delta
+			local phase = self.blinkElapsed % (self.BLINK_INTERVAL * 2)
+			if phase < self.BLINK_INTERVAL then
+				self.waveText.FontColor = Color(1, 0.25, 0.25, 1)
+			else
+				self.waveText.FontColor = Color(1, 1, 1, 1)
+			end
+		end
+	end
+
+	method void SubscribeGameEvent(any eventType, any callback)
+		-- Bus subscription via the single world event bus (§3); handlers tracked for OnEndPlay.
+		local busHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
+		table.insert(self.busHandlers, { evType = eventType, evHandler = busHandler })
+	end
+
+	method void WireButton(ButtonComponent button, any onClick)
+		-- Click + hover SFX wiring (ui-sound.md); buttons carry UITouchReceiveComponent in the .ui.
+		if not isvalid(button) then
+			return
+		end
+		local buttonEntity = button.Entity
+		local clickHandler = buttonEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.CLICK_SFX_RUID, self.SFX_VOLUME)
+			onClick(self)
+		end)
+		table.insert(self.uiHandlers, { target = buttonEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = buttonEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.HOVER_SFX_RUID, self.SFX_VOLUME)
+		end)
+		table.insert(self.uiHandlers, { target = buttonEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	method void OnZenClicked()
+		-- Client cooldown is presentation only; the server re-validates every guard (E2).
+		if not self.stageActive then
+			return
+		end
+		if self.cooldownLeft > 0 then
+			return
+		end
+		self.cooldownLeft = _BoardConfig.ZEN_COOLDOWN_SECONDS
+		log("[UIGameHudLogic] zen requested")
+		_WaveLogic:RequestZen()
+	end
+
+	method void OnRerollClicked()
+		-- Placement reroll (spec p.18). Server re-validates the remaining count (shared 3/stage with choice reroll);
+		-- the client only sends the request. rerollText is refreshed server-side via SetRerollLeft after RerollUsedEvent.
+		if not self.stageActive then
+			return
+		end
+		log("[UIGameHudLogic] placement reroll requested")
+		_RerollLogic:RequestReroll("placement")
+	end
+
+	method void OnExitClicked()
+		-- Pause/leave entry: confirm before abandoning the run (spec §4.4).
+		self.exitConfirmPanel.Enable = true
+	end
+
+	method void OnExitConfirmed()
+		-- Run abandon is a server decision; client only sends the request.
+		self.exitConfirmPanel.Enable = false
+		log("[UIGameHudLogic] abandon run requested")
+		_ModeStageLogic:AbandonRun()
+	end
+
+	method void OnExitCancelled()
+		-- Close the confirm dialog and keep playing.
+		self.exitConfirmPanel.Enable = false
+	end
+
+	method void OnStageStarted(StageStartedEvent event)
+		-- Resets every HUD readout from the stage config (single source: StageCatalogLogic, C-6/C-7).
+		local cfg = _StageCatalogLogic:GetStageConfig(event.stageId)
+		if cfg ~= nil then
+			self.bossZen = cfg.bossZen
+			self.failThreshold = cfg.failThreshold
+		end
+		self.currentMode = event.mode
+		self.stageActive = true
+		self.cooldownLeft = 0
+		self.blinkActive = false
+		self.blinkElapsed = 0
+		self.lastMonsterCount = -1
+		-- Stage start can arrive before TryWire completes (server event vs deferred child instantiation),
+		-- so capture readouts as pending and guard every bound-entity write (LEA-2007).
+		self.pendingWaveText = "WAVE 0/" .. self.bossZen
+		self.pendingLevelText = "Lv.1"
+		self.pendingExpRatio = 0
+		self.timeAttackElapsed = 0
+		self.timeAttackRunning = (event.mode == "TIME_ATTACK")
+		if isvalid(self.waveText) then
+			self.waveText.Text = self.pendingWaveText
+			self.waveText.FontColor = Color(1, 1, 1, 1)
+		end
+		self:SetExp(1, 0)
+		self:SetRerollLeft(_BmBalance.REROLL_PER_STAGE_LIMIT)
+		self:SetMonsterCount(0)
+		if isvalid(self.bossBanner) then
+			self.bossBanner.Enable = false
+		end
+		if isvalid(self.exitConfirmPanel) then
+			self.exitConfirmPanel.Enable = false
+		end
+		if isvalid(self.timerText) and isvalid(self.timerText.Entity) then
+			self.timerText.Entity.Enable = self.timeAttackRunning
+		end
+		self:UpdateTimerText()
+		log("[UIGameHudLogic] stage started: " .. event.stageId .. " mode=" .. event.mode)
+	end
+
+	method void OnStageEnded(StageEndedEvent event)
+		-- Freeze HUD state; ResultGroup handling belongs to UIResultLogic.
+		self.stageActive = false
+		self.timeAttackRunning = false
+		self.blinkActive = false
+		if isvalid(self.exitConfirmPanel) then
+			self.exitConfirmPanel.Enable = false
+		end
+		log("[UIGameHudLogic] stage ended: " .. event.result)
+	end
+
+	method void OnZenStarted(ZenStartedEvent event)
+		-- WAVE n/bossZen counter; red blink from bossZen-2 (spec §4.4). Pending-captured so a zen that
+		-- lands before wiring still shows the latest counter once ApplyPending runs (LEA-2007).
+		if event.isBossZen then
+			self.pendingWaveText = "BOSS"
+		else
+			self.pendingWaveText = "WAVE " .. event.zenIndex .. "/" .. self.bossZen
+		end
+		self.blinkActive = (event.zenIndex >= self.bossZen - self.BOSS_IMMINENT_ZEN_OFFSET)
+		if isvalid(self.waveText) then
+			self.waveText.Text = self.pendingWaveText
+			if not self.blinkActive then
+				self.waveText.FontColor = Color(1, 1, 1, 1)
+			end
+		end
+		log("[UIGameHudLogic] zen counter: " .. event.zenIndex .. "/" .. self.bossZen)
+	end
+
+	method void OnBossSpawned(BossSpawnedEvent event)
+		-- Transient boss banner; the boss HP bar itself is attached by MonsterUnit (C-8).
+		self.pendingWaveText = "BOSS"
+		if isvalid(self.waveText) then
+			self.waveText.Text = "BOSS"
+		end
+		if not isvalid(self.bossBanner) then
+			log("[UIGameHudLogic] boss banner skipped (not wired): " .. event.typeId)
+			return
+		end
+		self.bossBanner.Enable = true
+		if self.bannerTimerId ~= 0 then
+			_TimerService:ClearTimer(self.bannerTimerId)
+		end
+		self.bannerTimerId = _TimerService:SetTimerOnce(function()
+			if isvalid(self.bossBanner) then
+				self.bossBanner.Enable = false
+			end
+			self.bannerTimerId = 0
+		end, self.BOSS_BANNER_DURATION)
+		log("[UIGameHudLogic] boss banner shown: " .. event.typeId)
+	end
+
+	method void OnLevelUp(LevelUpEvent event)
+		-- Exp ratio arrives separately via SetExp; the event only carries the new level.
+		self.pendingLevelText = "Lv." .. event.newLevel
+		if isvalid(self.levelText) then
+			self.levelText.Text = self.pendingLevelText
+		end
+		log("[UIGameHudLogic] level up shown: " .. event.newLevel)
+	end
+
+	method void OnJobSelected(JobSelectedEvent event)
+		-- Display meta lives in CombatConfig (C-12: display only, no damage numbers). JobSelectedEvent can
+		-- precede wiring, so the name is held as pending and the bound text guarded (LEA-2007).
+		local meta = _CombatConfig:GetJobMeta(event.jobId)
+		if meta ~= nil then
+			self.pendingJobText = meta.name
+			if isvalid(self.jobText) then
+				self.jobText.Text = meta.name
+			end
+		end
+	end
+
+	method void SetExp(integer level, number ratio)
+		-- §4.9 client API (caller: GrowthLogic client push).
+		self.pendingLevelText = "Lv." .. level
+		self.pendingExpRatio = ratio
+		if isvalid(self.levelText) then
+			self.levelText.Text = self.pendingLevelText
+		end
+		if isvalid(self.expFill) then
+			self.expFill.FillAmount = math.max(0, math.min(1, ratio))
+		end
+	end
+
+	method void SetMonsterCount(integer n)
+		-- §4.9 client API; also fed by the @Sync poll in OnUpdate.
+		self.lastMonsterCount = n
+		if not isvalid(self.monsterText) then
+			return
+		end
+		self.monsterText.Text = "몬스터 " .. n .. "/" .. self.failThreshold
+		if n >= self.failThreshold - self.MONSTER_WARN_MARGIN then
+			self.monsterText.FontColor = Color(1, 0.25, 0.25, 1)
+		else
+			self.monsterText.FontColor = Color(1, 1, 1, 1)
+		end
+	end
+
+	method void SetRerollLeft(integer n)
+		-- §4.9 client API (caller: stage start init + OnRerollUsed bus handler).
+		if not isvalid(self.rerollText) then
+			return
+		end
+		self.rerollText.Text = "리롤 " .. n
+	end
+
+	method void OnRerollUsed(RerollUsedEvent event)
+		-- Both placement and choice rerolls share one per-stage counter (C-23), so any RerollUsedEvent
+		-- for the local player refreshes the HUD remaining count (audit #2).
+		if event.userId ~= self:GetLocalUserId() then
+			return
+		end
+		self:SetRerollLeft(event.remaining)
+		log("[UIGameHudLogic] reroll left: " .. event.remaining)
+	end
+
+	method string GetLocalUserId()
+		-- LocalPlayer is client-only and may be invalid during the first frames.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			return ""
+		end
+		return player.PlayerComponent.UserId
+	end
+
+	method void UpdateTimerText()
+		-- TIME_ATTACK display is local presentation; the authoritative record is server-side (D5).
+		if not isvalid(self.timerText) then
+			return
+		end
+		local totalSeconds = math.floor(self.timeAttackElapsed)
+		local minutes = math.floor(totalSeconds / 60)
+		local seconds = totalSeconds % 60
+		self.timerText.Text = string.format("%02d:%02d", minutes, seconds)
+	end
+
+end

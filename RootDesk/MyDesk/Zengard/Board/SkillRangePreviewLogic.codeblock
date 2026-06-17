@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://32832a86-cf6d-4b74-95d4-9c4d4b419227",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "32832a86-cf6d-4b74-95d4-9c4d4b419227",
+      "Language": 1,
+      "Name": "SkillRangePreviewLogic",
+      "Type": 5,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

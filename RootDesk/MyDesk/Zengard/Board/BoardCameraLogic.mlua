@@ -1,0 +1,117 @@
+@Logic
+@ExecSpace("ClientOnly")
+script BoardCameraLogic extends Logic
+
+	-- Board camera = a DEDICATED STATIC camera, NOT the player's camera.
+	--
+	-- The player's CameraComponent lives ON the player entity and therefore tracks it. The player is
+	-- teleported to a random cell every zen, so any approach that keeps using the player camera makes the
+	-- view move each zen. The camera-restricted bound does NOT help: the engine clamps so the bound stays
+	-- inside the viewport, so a bound smaller than the viewport (a board-sized or point bound) imposes no
+	-- constraint and the camera free-follows the player (the earlier box/point-bound attempts failed for
+	-- exactly this reason — verified: the active camera's world pos equalled the player's and moved each zen).
+	--
+	-- The only robust fix is a camera that is not attached to the player. We spawn a tiny client-local
+	-- entity at the board view center, add a CameraComponent to it, and CameraService:SwitchCameraTo it for
+	-- the duration of the stage. Its world position never changes, so the board is rock-steady across zens
+	-- (verified: active camera world pos constant while the player moves all over). On stage end we switch
+	-- back to the player camera and destroy the board camera.
+
+	-- World-space +X shift of the view center past the board center, so the board renders to the screen's
+	-- left and clears the right-side CombatControlHUD panel. The static camera sits at (boardCenter + shift).
+	property number BOARD_VIEW_SHIFT_X = 1.2
+
+	-- Fixed zoom for the board view. The PLAYABLE viewport is shorter than the full 1080 (the HUD eats
+	-- top/bottom), so zoom 130 clipped the board's bottom rows. 100 frames the whole 7x7 board with clear
+	-- top/bottom/left margin while staying left of the right-side CombatControlHUD (verified by screenshot).
+	-- 88 (down from 100): the full 7x7 board + wooden frame now fits with clear margin so the bottom row is
+	-- never clipped and the top status bar clears the board top (verified in-engine with a full monster wave).
+	property number BOARD_ZOOM = 88
+
+	-- Spawnable host for the runtime-added CameraComponent. We only need a transform to hang the camera on;
+	-- the highlight model is a known client-spawnable entity and its sprite is hidden (Visible=false), so
+	-- nothing of it renders. A dedicated empty model would be marginally cleaner but adds an asset file.
+	property string cameraHostModelId = "skillrangehighlight"
+
+	property any boardCam = nil
+
+	property any stageStartedHandler = nil
+
+	property any stageEndedHandler = nil
+
+	method void OnBeginPlay()
+		self.stageStartedHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+		log("[BoardCameraLogic] OnBeginPlay")
+	end
+
+	method void OnEndPlay()
+		if self.stageStartedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedHandler)
+			self.stageStartedHandler = nil
+		end
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+			self.stageEndedHandler = nil
+		end
+		self:DestroyBoardCamera()
+	end
+
+	method void OnStageStarted(StageStartedEvent event)
+		-- Switch to the static board camera for the whole stage. It never moves, so the board never moves.
+		if not self:EnsureBoardCamera() then
+			log_warning("[BoardCameraLogic] board camera not ready; view will follow the player")
+			return
+		end
+		_CameraService:SwitchCameraTo(self.boardCam.CameraComponent)
+		log("[BoardCameraLogic] switched to static board camera")
+	end
+
+	method void OnStageEnded(StageEndedEvent event)
+		-- Hand the view back to the normal player-follow camera and drop the board camera.
+		local player = _UserService.LocalPlayer
+		if isvalid(player) and isvalid(player.CameraComponent) then
+			_CameraService:SwitchCameraTo(player.CameraComponent)
+		end
+		self:DestroyBoardCamera()
+		log("[BoardCameraLogic] restored player camera")
+	end
+
+	method boolean EnsureBoardCamera()
+		-- Lazily spawn the static camera entity, add a CameraComponent, place it at the board view center,
+		-- and set its zoom. Returns false (caller bails) until the local player + map are ready.
+		if isvalid(self.boardCam) and isvalid(self.boardCam.CameraComponent) then
+			return true
+		end
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.CurrentMap) then
+			return false
+		end
+		local vx = _BoardConfig.BOARD_CENTER_X + self.BOARD_VIEW_SHIFT_X
+		local vy = _BoardConfig.BOARD_CENTER_Y
+		local e = _SpawnService:SpawnByModelId(self.cameraHostModelId, "ZengardBoardCamera", Vector3(vx, vy, 0), player.CurrentMap)
+		if not isvalid(e) then
+			log_error("[BoardCameraLogic] failed to spawn board camera host")
+			return false
+		end
+		e.Visible = false
+		e:AddComponent("CameraComponent")
+		local cc = e.CameraComponent
+		if not isvalid(cc) then
+			log_error("[BoardCameraLogic] AddComponent CameraComponent failed")
+			e:Destroy()
+			return false
+		end
+		cc.ZoomRatio = self.BOARD_ZOOM
+		self.boardCam = e
+		return true
+	end
+
+	method void DestroyBoardCamera()
+		if isvalid(self.boardCam) then
+			self.boardCam:Destroy()
+		end
+		self.boardCam = nil
+	end
+
+end

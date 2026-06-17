@@ -1,0 +1,78 @@
+@Logic
+script BoardConfig extends Logic
+
+	property integer GRID_COLS = 7
+
+	property integer GRID_ROWS = 7
+
+	property number CELL_SIZE = 0.8
+
+	property number BOARD_CENTER_X = -2.0
+
+	property number BOARD_CENTER_Y = 0.3
+
+	property number ZEN_COOLDOWN_SECONDS = 1.0
+
+	property boolean REPOSITION_MONSTERS_ON_ZEN = false
+
+	property integer ORDER_IN_LAYER_BASE = 2
+
+	property string BOARD_SORTING_LAYER = "MapLayer0"
+
+	-- map01 defines only one Map Layer ("MapLayer0"): board tiles, monsters and combat FX all
+	-- belong to it, so OrderInLayer alone cannot push an FX above the board art while it is pinned
+	-- into the same map layer. Setting IgnoreMapLayerCheck=true on the effect disables the engine's
+	-- automatic "snap SortingLayer into the named Map Layer" replacement, so the explicit OrderInLayer
+	-- (board order +100) is honored and the skill animation reads as a foreground overlay.
+	property boolean BOARD_FX_IGNORE_MAP_LAYER_CHECK = true
+
+	property number ENTITY_VISIBLE_HEIGHT = 0.72
+
+	property number BOSS_VISIBLE_HEIGHT = 1.0
+
+	property number VERTICAL_OFFSET = -0.36
+
+	-- Player board-piece size. The avatar sprite has a lot of transparent vertical padding, so matching
+	-- its bounding box to a monster's 0.72u made the VISIBLE character far smaller than the mushrooms
+	-- (0.43 read as "tiny"). 0.75 sizes the visible character to match the fit-scaled monsters; the extra
+	-- (transparent) box height just overhangs and does not render. Verified side-by-side against an orange
+	-- mushroom in the same row at both close-up and normal board zoom.
+	property number PLAYER_BOARD_SCALE = 0.75
+
+	-- Player-specific foot offset (the shared monster VERTICAL_OFFSET -0.36 assumes a 0.72u sprite). At
+	-- PLAYER_BOARD_SCALE the avatar's visible character is taller, so it is dropped slightly more to keep
+	-- the body centered in the cell and the feet aligned with the monsters in the same row.
+	property number PLAYER_VERTICAL_OFFSET = -0.40
+
+	property number SHADOW_ALPHA = 0.28
+
+	property string MAP_ENTITY_PATH = "/maps/map01"
+
+	method integer GetOrderInLayer(integer row)
+		-- Pseudo-depth contract (MASTER_PLAN §7.2): lower rows are visually in front.
+		return self.ORDER_IN_LAYER_BASE + (self.GRID_ROWS - 1 - row)
+	end
+
+	method Vector3 ApplyCellFitOffset(Vector3 cellWorldPos)
+		-- Centers a bottom-pivot piece vertically inside the cell. MSW mob/avatar sprites pivot at
+		-- the feet (ny=0), so Position is the foot point; placing the feet at the cell center leaves
+		-- the body overhanging the top edge. VERTICAL_OFFSET (= -visibleHeight/2) drops the feet so
+		-- the visible bounds sit centered on the cell. X stays on the cell center (no horizontal shift).
+		return Vector3(cellWorldPos.x, cellWorldPos.y + self.VERTICAL_OFFSET, cellWorldPos.z)
+	end
+
+	method number ComputeFitScale(number nativeHeightUnits, boolean isBoss)
+		-- Single source for board piece sizing: scale a sprite so its visible height fills the
+		-- target band of the 0.8u cell (regular ~75%, boss intentionally larger). Returns the
+		-- uniform Transform scale; nativeHeightUnits = sprite pixel height / PixelPerUnit.
+		if nativeHeightUnits <= 0 then
+			return 1
+		end
+		local target = self.ENTITY_VISIBLE_HEIGHT
+		if isBoss then
+			target = self.BOSS_VISIBLE_HEIGHT
+		end
+		return target / nativeHeightUnits
+	end
+
+end

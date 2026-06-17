@@ -1,0 +1,10 @@
+@Event
+script ZenStartedEvent extends EventType
+
+	property integer zenIndex = 0
+
+	property boolean isBossZen = false
+
+	property integer spawnedCount = 0
+
+end

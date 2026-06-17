@@ -1,0 +1,142 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UIToastLogic extends Logic
+
+	-- Shared toast (MASTER_PLAN §2.2): ShowMessage(msg) is the §4.9 client API every system may call.
+
+	-- UI bindings: UUIDs injected by UIBuilder write(bind).
+	property Entity toastRoot = "f4e30bc8-3d85-47f6-8c2a-f07eeacdab92"
+
+	property TextComponent messageText = "d83f6606-3ae6-49c7-ab6c-ed364edfea2b"
+
+	property number TOAST_DURATION = 2.0
+
+	property number TOAST_FADE_DURATION = 0.3
+
+	property integer fadeTimerId = 0
+
+	property table busHandlers = {}
+
+	property boolean wired = false
+
+	-- Messages arriving before TryWire succeeds are held here, capped at PENDING_LIMIT, then flushed in order.
+	property table pending = {}
+
+	property integer PENDING_LIMIT = 5
+
+	method void OnBeginPlay()
+		-- Bus subscription is safe at OnBeginPlay; the toast shell hide is deferred to TryWire because
+		-- ToastGroup's children may not be instantiated on the first frame (C-21 pattern, applied defensively).
+		log("[UIToastLogic] OnBeginPlay")
+		self:SubscribeGameEvent(ZenStartedEvent, self.OnZenStarted)
+		self:SubscribeGameEvent(FusionActivatedEvent, self.OnFusionActivated)
+		self:SubscribeGameEvent(SkillFusedEvent, self.OnSkillFused)
+	end
+
+	method void OnUpdate(number delta)
+		-- Defers the toast shell hide until its subtree is valid.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+	end
+
+	method boolean TryWire()
+		-- One-shot: hide the toast shell once it and its message child are instantiated.
+		if not isvalid(self.toastRoot) or not isvalid(self.messageText) then
+			return false
+		end
+		self.toastRoot.Enable = false
+		log("[UIToastLogic] wired")
+		self:FlushPending()
+		return true
+	end
+
+	method void FlushPending()
+		-- Drains queued messages in arrival order once the shell is wired. Cleared whether or not it had entries.
+		if #self.pending == 0 then
+			return
+		end
+		local queued = self.pending
+		self.pending = {}
+		for _, msg in ipairs(queued) do
+			self:ShowMessage(msg)
+		end
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of the fade timer and bus subscriptions.
+		if self.fadeTimerId ~= 0 then
+			_TimerService:ClearTimer(self.fadeTimerId)
+			self.fadeTimerId = 0
+		end
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+	end
+
+	method void SubscribeGameEvent(any eventType, any callback)
+		-- Bus subscription via the single world event bus (§3); handlers tracked for OnEndPlay.
+		local busHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
+		table.insert(self.busHandlers, { evType = eventType, evHandler = busHandler })
+	end
+
+	method void ShowMessage(string msg)
+		-- §4.9 shared client API; a new message replaces the current one and restarts the fade.
+		if not isvalid(self.toastRoot) or not isvalid(self.messageText) then
+			-- Hold until TryWire flushes; drop only past PENDING_LIMIT so a pre-wire burst cannot grow unbounded.
+			if #self.pending >= self.PENDING_LIMIT then
+				log_warning("[UIToastLogic] pending queue full; dropped: " .. msg)
+				return
+			end
+			table.insert(self.pending, msg)
+			log("[UIToastLogic] ShowMessage queued before wire: " .. msg)
+			return
+		end
+		self.messageText.Text = msg
+		self.toastRoot.Enable = true
+		local canvasGroup = self.toastRoot.CanvasGroupComponent
+		canvasGroup.GroupAlpha = 1
+		if self.fadeTimerId ~= 0 then
+			_TimerService:ClearTimer(self.fadeTimerId)
+			self.fadeTimerId = 0
+		end
+		local elapsed = 0
+		local prevTime = _UtilLogic.ElapsedSeconds
+		self.fadeTimerId = _TimerService:SetTimerRepeat(function()
+			-- ElapsedSeconds frame-diff: the timer interval itself is not exact (runtime-patterns caveat 12).
+			local now = _UtilLogic.ElapsedSeconds
+			elapsed += now - prevTime
+			prevTime = now
+			if elapsed >= self.TOAST_DURATION + self.TOAST_FADE_DURATION then
+				canvasGroup.GroupAlpha = 0
+				self.toastRoot.Enable = false
+				_TimerService:ClearTimer(self.fadeTimerId)
+				self.fadeTimerId = 0
+			elseif elapsed >= self.TOAST_DURATION then
+				canvasGroup.GroupAlpha = 1 - (elapsed - self.TOAST_DURATION) / self.TOAST_FADE_DURATION
+			end
+		end, 1 / 60)
+		log("[UIToastLogic] toast shown: " .. msg)
+	end
+
+	method void OnZenStarted(ZenStartedEvent event)
+		-- Boss zen only — toasting every normal zen would spam each button press (§3 consumer role).
+		if event.isBossZen then
+			self:ShowMessage("보스 머쉬맘이 등장합니다!")
+		end
+	end
+
+	method void OnFusionActivated(FusionActivatedEvent event)
+		-- Recipe ids are internal vocabulary; the toast stays generic Korean copy.
+		self:ShowMessage("스킬 합성이 활성화되었습니다!")
+	end
+
+	method void OnSkillFused(SkillFusedEvent event)
+		-- Fusion completion notice (§3: SkillFusedEvent → UIToastLogic).
+		self:ShowMessage("스킬 합성 완료!")
+	end
+
+end

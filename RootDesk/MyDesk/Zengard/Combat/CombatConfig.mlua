@@ -1,0 +1,57 @@
+@Logic
+script CombatConfig extends Logic
+
+	property number CAST_INTERVAL = 0.6
+
+	property number SEQUENCE_START_DELAY = 0.3
+
+	property number HIT_FX_DURATION = 0.4
+
+	property string DEFAULT_COMBAT_MODE = "MANUAL"
+
+	property string DEFAULT_DIRECTION = "RIGHT"
+
+	property string DAMAGE_SKIN_RUID = "3271c3e79bf04ecba9a107d55495970d"
+
+	method table GetDirections()
+		-- 4-way only: grid board has no diagonal attacks (D-5).
+		return { "UP", "DOWN", "LEFT", "RIGHT" }
+	end
+
+	method boolean IsValidMode(string mode)
+		-- Valid per-unit combat modes accepted by RequestSetCombatConfig.
+		return mode == "MANUAL" or mode == "AUTO"
+	end
+
+	method boolean IsValidDirection(string direction)
+		-- "RANDOM" is a storable direction meaning per-cast random pick (MASTER_PLAN §4.4).
+		if direction == "RANDOM" then
+			return true
+		end
+		for _, d in ipairs(self:GetDirections()) do
+			if d == direction then
+				return true
+			end
+		end
+		return false
+	end
+
+	method table GetJobIds()
+		-- Job key vocabulary; "thief" not "rogue" (C-14).
+		return { "warrior", "archer", "mage", "thief" }
+	end
+
+	method table GetJobMeta(string jobId)
+		-- Display meta only — damage numbers live in skill data, not jobs (C-12).
+		if self._T.jobMeta == nil then
+			self._T.jobMeta = {
+				warrior = { name = "전사", desc = "주변 4칸을 노리는 강력한 일격" },
+				archer = { name = "궁수", desc = "바라보는 방향 직선 관통 공격" },
+				mage = { name = "마법사", desc = "주변 8칸 광역 공격" },
+				thief = { name = "도적", desc = "긴 사거리 단일 타겟 공격" },
+			}
+		end
+		return self._T.jobMeta[jobId]
+	end
+
+end

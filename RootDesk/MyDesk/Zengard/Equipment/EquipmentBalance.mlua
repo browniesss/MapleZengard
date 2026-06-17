@@ -1,0 +1,52 @@
+@Logic
+script EquipmentBalance extends Logic
+
+	-- MASTER_PLAN §7.9 + spec §3.2. Loot drop constants live here because the
+	-- worker manifest assigns no LootBalance file (spec §4.1 maps §3.2 to this script).
+
+	property number CHOICE_EQUIP_CHANCE_BASE = 0.10
+
+	property number CHOICE_EQUIP_CHANCE_EXPANDED = 0.15
+
+	property number LOOT_DROP_CHANCE_NORMAL = 0.20
+
+	property integer LOOT_DROP_COUNT_BOSS = 3
+
+	method table GetAllCards()
+		-- Returns the 8-card run-equipment pool as a list (MASTER_PLAN §7.9).
+		if self._T.cards == nil then
+			self:BuildCards()
+		end
+		return self._T.cards
+	end
+
+	method table GetCard(string equipId)
+		-- Returns one card table, or nil when equipId is unknown.
+		if self._T.cardsById == nil then
+			self:BuildCards()
+		end
+		return self._T.cardsById[equipId]
+	end
+
+	method void BuildCards()
+		-- Builds the card pool lazily; property declarations cannot hold table literals.
+		-- stats keys use the GetEquipStatMultipliers schema (MASTER_PLAN §4.8).
+		local cards = {
+			{ id = "eq_old_gladius", name = "낡은 글라디우스", desc = "공격력 +13%", stats = { atkMul = 0.13 }, iconRuid = "8dc53a706b0f4d16947870f96153ddb8" },
+			{ id = "eq_fruit_knife", name = "과도", desc = "공격력 +8%, 공격 속도 +10%", stats = { atkMul = 0.08, atkSpeedMul = 0.10 }, iconRuid = "5e8567767e7544da94326f2f3dfd6a9e" },
+			{ id = "eq_maple_staff", name = "단풍 지팡이", desc = "스킬 데미지 +20%", stats = { skillDmgMul = 0.20 }, iconRuid = "8b65f7c206ef459d8ed8cd5ff1d6e4b3" },
+			{ id = "eq_battle_bow", name = "전투 활", desc = "공격 사거리 +1칸", stats = { rangeAdd = 1 }, iconRuid = "55d7049d8b2b4a83861dabf035bf45d1" },
+			{ id = "eq_work_gloves", name = "작업용 장갑", desc = "크리티컬 확률 +10%p", stats = { critChanceAdd = 0.10 }, iconRuid = "ab2ee69e627f40a2bc559e40dd8bd1c0" },
+			{ id = "eq_red_whip", name = "붉은 채찍", desc = "공격 대상 +1", stats = { targetAdd = 1 }, iconRuid = "07640dacfe6644bd81a180660bf67880" },
+			{ id = "eq_old_maple_book", name = "낡은 단풍 서적", desc = "경험치 획득 +15%", stats = { expGainMul = 0.15 }, iconRuid = "c6f24ead63214cd48c45385528ddd60d" },
+			{ id = "eq_lucky_charm", name = "행운의 부적", desc = "전리품 드랍률 +10%p", stats = { lootDropAdd = 0.10 }, iconRuid = "ab37d9c03a2648468678e79ad7519326" },
+		}
+		local byId = {}
+		for _, card in ipairs(cards) do
+			byId[card.id] = card
+		end
+		self._T.cards = cards
+		self._T.cardsById = byId
+	end
+
+end

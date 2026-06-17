@@ -1,0 +1,271 @@
+@Logic
+script UICompanionPanelLogic extends Logic
+
+	-- Entity refs injected by UIBuilder bind (C-21) — ui/CompanionPanel.ui
+	property Entity rootGroup = "d1d6219d-4ada-4d88-8e23-0a2b4370080d"
+
+	property Entity slot1Root = "c4a3cc1d-e011-464e-b729-6929cb855197"
+
+	property Entity slot2Root = "b37740f0-1ed4-40d8-9536-b325826f6c85"
+
+	-- ui-sound.md default UI SFX RUIDs
+	property string clickSfxRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSfxRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property any slotRoots = nil
+
+	-- companionId → { companionId, secondJob, direction, skillIds, slotIndex }
+	property table roster = {}
+
+	-- slotIndex(1..2) → companionId
+	property table slotOwners = {}
+
+	-- Entity wiring is deferred to OnUpdate because client UI entities aren't valid in OnBeginPlay.
+	property boolean wired = false
+
+	property table busHandlers = {}
+
+	property table buttonHandlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Subscribes the companion bus events; per-slot button wiring waits for TryWire.
+		self.slotRoots = { self.slot1Root, self.slot2Root }
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		self:Subscribe(CompanionJoinedEvent, self.OnCompanionJoined)
+		self:Subscribe(CompanionOrderChangedEvent, self.OnCompanionOrderChanged)
+		self:Subscribe(StageEndedEvent, self.OnStageEnded)
+		log("[UICompanionPanel] OnBeginPlay")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- One-shot deferred wiring once both slot roots become valid.
+		if self.wired then
+			return
+		end
+		if self:TryWire() then
+			self.wired = true
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- Wires slot buttons and renders the empty state; false retries next frame until roots are valid.
+		for slotIndex = 1, #self.slotRoots do
+			if not isvalid(self.slotRoots[slotIndex]) then
+				return false
+			end
+		end
+		for slotIndex = 1, #self.slotRoots do
+			self:WireSlotButtons(slotIndex)
+			self:RefreshSlot(slotIndex)
+		end
+		log("[UICompanionPanel] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Releases bus subscriptions and every button handler taken in OnBeginPlay.
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+		for _, rec in ipairs(self.buttonHandlers) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.buttonHandlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(any eventType, any callback)
+		-- Tracks a game-bus subscription so OnEndPlay can disconnect it.
+		local evHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
+		table.insert(self.busHandlers, { evType = eventType, evHandler = evHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireSlotButtons(integer slotIndex)
+		-- 4 direction buttons + the cast-order rotate button, all routed to CompanionLogic Server RPCs.
+		local capturedIndex = slotIndex
+		local root = self.slotRoots[slotIndex]
+		if not isvalid(root) then
+			return
+		end
+		self:WireButton(root:GetChildByName("BtnUp", false), function() self:OnDirectionClicked(capturedIndex, "UP") end)
+		self:WireButton(root:GetChildByName("BtnDown", false), function() self:OnDirectionClicked(capturedIndex, "DOWN") end)
+		self:WireButton(root:GetChildByName("BtnLeft", false), function() self:OnDirectionClicked(capturedIndex, "LEFT") end)
+		self:WireButton(root:GetChildByName("BtnRight", false), function() self:OnDirectionClicked(capturedIndex, "RIGHT") end)
+		self:WireButton(root:GetChildByName("BtnRotate", false), function() self:OnRotateClicked(capturedIndex) end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity btnEntity, any onClick)
+		-- Centralizes click/hover SFX (ui-sound.md defaults) around the action callback.
+		if not isvalid(btnEntity) then
+			log_warning("[UICompanionPanel] WireButton: invalid button entity")
+			return
+		end
+		local clickHandler = btnEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSfxRuid, 1.0)
+			if onClick ~= nil then
+				onClick()
+			end
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = btnEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSfxRuid, 0.6)
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCompanionJoined(CompanionJoinedEvent event)
+		-- Assigns the companion to the first free slot and reveals the panel (MAX_COMPANIONS = 2).
+		local slotIndex = 0
+		for i = 1, #self.slotRoots do
+			if self.slotOwners[i] == nil then
+				slotIndex = i
+				break
+			end
+		end
+		if slotIndex == 0 then
+			log_warning("[UICompanionPanel] no free slot for companion: " .. event.companionId)
+			return
+		end
+		self.roster[event.companionId] = {
+			companionId = event.companionId,
+			secondJob = event.secondJob,
+			direction = _CompanionConfig.DEFAULT_DIRECTION,
+			skillIds = { event.initialSkillId },
+			slotIndex = slotIndex,
+		}
+		self.slotOwners[slotIndex] = event.companionId
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = true
+		end
+		self:RefreshSlot(slotIndex)
+		log("[UICompanionPanel] companion joined: " .. event.secondJob .. " slot=" .. tostring(slotIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCompanionOrderChanged(CompanionOrderChangedEvent event)
+		-- Server-confirmed direction / cast order; the panel is display-only until this arrives.
+		local rec = self.roster[event.companionId]
+		if rec == nil then
+			return
+		end
+		rec.direction = event.direction
+		rec.skillIds = event.skillIds
+		self:RefreshSlot(rec.slotIndex)
+		log("[UICompanionPanel] order changed: " .. event.companionId .. " dir=" .. event.direction)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Companions never outlive the run (D11) — clear and hide.
+		self.roster = {}
+		self.slotOwners = {}
+		for i = 1, #self.slotRoots do
+			self:RefreshSlot(i)
+		end
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		log("[UICompanionPanel] cleared (stage " .. event.result .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDirectionClicked(integer slotIndex, string direction)
+		-- Sends the owner-validated direction request (§4.7).
+		local companionId = self.slotOwners[slotIndex]
+		if companionId == nil then
+			return
+		end
+		_CompanionLogic:RequestSetDirection(companionId, direction)
+		log("[UICompanionPanel] direction requested: " .. companionId .. " -> " .. direction)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRotateClicked(integer slotIndex)
+		-- Prototype order input: rotate the cast queue one step (first skill goes last).
+		local companionId = self.slotOwners[slotIndex]
+		if companionId == nil then
+			return
+		end
+		local rec = self.roster[companionId]
+		if rec == nil or rec.skillIds == nil or #rec.skillIds < 2 then
+			_UIToastLogic:ShowMessage("변경할 스킬 순서가 없습니다")
+			return
+		end
+		local rotated = {}
+		for i = 2, #rec.skillIds do
+			table.insert(rotated, rec.skillIds[i])
+		end
+		table.insert(rotated, rec.skillIds[1])
+		_CompanionLogic:RequestSetSkillOrder(companionId, rotated)
+		log("[UICompanionPanel] skill order rotate requested: " .. companionId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSlot(integer slotIndex)
+		-- Renders one slot: second-job title + current direction / cast order summary.
+		local root = self.slotRoots[slotIndex]
+		if not isvalid(root) then
+			return
+		end
+		local titleText = root:GetChildByName("TitleText", false)
+		local orderText = root:GetChildByName("OrderText", false)
+		local companionId = self.slotOwners[slotIndex]
+		if companionId == nil then
+			if isvalid(titleText) then
+				titleText.TextComponent.Text = "동료 없음"
+			end
+			if isvalid(orderText) then
+				orderText.TextComponent.Text = ""
+			end
+			return
+		end
+		local rec = self.roster[companionId]
+		if isvalid(titleText) then
+			titleText.TextComponent.Text = _CompanionConfig:GetSecondJobDisplayName(rec.secondJob)
+		end
+		if isvalid(orderText) then
+			local names = {}
+			for _, skillId in ipairs(rec.skillIds or {}) do
+				local data = _SkillDataLogic:GetSkillData(skillId)
+				if data ~= nil then
+					table.insert(names, data.displayName)
+				else
+					table.insert(names, skillId)
+				end
+			end
+			orderText.TextComponent.Text = "방향: " .. self:GetDirectionLabel(rec.direction) .. "\n순서: " .. table.concat(names, " → ")
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetDirectionLabel(string direction)
+		-- Korean display labels for the §4.4 direction vocabulary.
+		if direction == "UP" then
+			return "위"
+		end
+		if direction == "DOWN" then
+			return "아래"
+		end
+		if direction == "LEFT" then
+			return "왼쪽"
+		end
+		if direction == "RIGHT" then
+			return "오른쪽"
+		end
+		return "랜덤"
+	end
+
+end

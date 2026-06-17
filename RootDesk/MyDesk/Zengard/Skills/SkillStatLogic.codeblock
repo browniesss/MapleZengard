@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://a94c1f76-1f7b-4eef-82ef-ac6a1a8872c3",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "a94c1f76-1f7b-4eef-82ef-ac6a1a8872c3",
+      "Language": 1,
+      "Name": "SkillStatLogic",
+      "Type": 5,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

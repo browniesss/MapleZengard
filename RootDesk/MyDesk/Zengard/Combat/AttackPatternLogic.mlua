@@ -1,0 +1,76 @@
+@Logic
+script AttackPatternLogic extends Logic
+
+	method table ResolveSkillCells(string skillId, integer col, integer row, string direction)
+		-- Resolves candidate cells for the skill's shape (#3 §7.4 contract); shared by server judgement and client preview.
+		local cells = {}
+		local skillData = _SkillDataLogic:GetSkillData(skillId)
+		if skillData == nil then
+			log_warning("[AttackPatternLogic] unknown skillId: " .. tostring(skillId))
+			return cells
+		end
+		local shape = skillData.shape
+		if shape == "ADJACENT4" or shape == "ADJACENT4_SINGLE" then
+			-- ADJACENT4_SINGLE returns all 4 candidate cells; single-target pick is the caller's job.
+			self:PushIfInside(cells, col, row + 1)
+			self:PushIfInside(cells, col, row - 1)
+			self:PushIfInside(cells, col - 1, row)
+			self:PushIfInside(cells, col + 1, row)
+		elseif shape == "ADJACENT8" then
+			for dc = -1, 1 do
+				for dr = -1, 1 do
+					if not (dc == 0 and dr == 0) then
+						self:PushIfInside(cells, col + dc, row + dr)
+					end
+				end
+			end
+		elseif shape == "LINE" then
+			-- Near-to-far order matters: non-pierce LINE stops at the first occupied cell.
+			-- equip rangeAdd is not applied here — base LINE range 7 already exceeds the 7x7 board span.
+			local delta = self:DirectionToDelta(direction)
+			if delta.dc ~= 0 or delta.dr ~= 0 then
+				local c = col + delta.dc
+				local r = row + delta.dr
+				local steps = 0
+				local range = skillData.range or 0
+				while steps < range and _BoardLogic:IsInside(c, r) do
+					table.insert(cells, { col = c, row = r })
+					c += delta.dc
+					r += delta.dr
+					steps += 1
+				end
+			end
+		end
+		-- RANGED_TARGET resolves by entity, PASSIVE never casts — both yield no cells.
+		return cells
+	end
+
+	method boolean IsInRange(integer c1, integer r1, integer c2, integer r2, integer range)
+		-- Chebyshev distance (MASTER_PLAN §4.4).
+		local dc = math.abs(c1 - c2)
+		local dr = math.abs(r1 - r2)
+		return math.max(dc, dr) <= range
+	end
+
+	method table DirectionToDelta(string direction)
+		-- UP=(0,1) DOWN=(0,-1) LEFT=(-1,0) RIGHT=(1,0); unknown direction yields no movement.
+		if direction == "UP" then
+			return { dc = 0, dr = 1 }
+		elseif direction == "DOWN" then
+			return { dc = 0, dr = -1 }
+		elseif direction == "LEFT" then
+			return { dc = -1, dr = 0 }
+		elseif direction == "RIGHT" then
+			return { dc = 1, dr = 0 }
+		end
+		return { dc = 0, dr = 0 }
+	end
+
+	method void PushIfInside(table cells, integer col, integer row)
+		-- Board-boundary clipping shared by all cell shapes (E-5).
+		if _BoardLogic:IsInside(col, row) then
+			table.insert(cells, { col = col, row = row })
+		end
+	end
+
+end

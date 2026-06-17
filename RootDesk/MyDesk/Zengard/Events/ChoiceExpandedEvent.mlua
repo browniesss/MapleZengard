@@ -1,0 +1,6 @@
+@Event
+script ChoiceExpandedEvent extends EventType
+
+	property string userId = ""
+
+end

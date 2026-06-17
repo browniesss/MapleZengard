@@ -1,0 +1,404 @@
+@Logic
+script UIChoicePopupLogic extends Logic
+
+	property Entity popupRoot = "99061b9f-b49a-4b4e-af95-0aa8a3409fa5"
+
+	property Entity card1 = "512e8612-6232-431a-8901-0b4c74290efa"
+
+	property Entity card2 = "bc9750f8-fbce-4524-9b5c-be0bd89c187b"
+
+	property Entity card3 = "747c8263-e692-494e-be38-fe5c74961552"
+
+	property Entity card4 = "44e661eb-b4df-4fa9-982d-493e389524fb"
+
+	property Entity card5 = "e483d289-828e-4c0b-87a6-5df0be6c54ba"
+
+	property TextComponent titleText = "5bca17b0-cba1-4f91-bd1a-4a6899534093"
+
+	property Entity btnReroll = "fc7626d2-c63e-4ab6-a48c-d2fe7aa45c63"
+
+	property Entity btnExpand = "a8f2ccd0-7b7a-4218-a7f3-59b58f572e2d"
+
+	property Entity btnJobAdv = "0c77eafb-021f-434d-a883-dc43dbaeba7e"
+
+	property TextComponent lootText = "d8370dd7-b3f4-488f-b643-e7b61fd7b46a"
+
+	-- §7.11: card 300 wide + 24 gap; width is read from the bound card rect at runtime.
+	property number cardSpacing = 24
+
+	-- ui-sound.md default UI SFX RUIDs (§5.2 binding contract).
+	property string clickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property number sfxVolume = 0.8
+
+	property integer currentSetId = 0
+
+	-- Client-cached affordance inputs for the advance/expand buttons (E* UX clarity).
+	-- currentLoot tracks LootChangedEvent.amount; currentSlotCount is the count last shown
+	-- (== EXPANDED_SLOT_COUNT once expanded). advanceOverride is an optional server-provided
+	-- gate (nil = no override; exposure count is server-only, so default keeps the button live).
+	property integer currentLoot = 0
+
+	property integer currentSlotCount = 0
+
+	property any advanceOverride = nil
+
+	-- Advisory: the local player requested an expansion this run (server applies it to the NEXT
+	-- set). Keeps the expand button from re-enabling on the open popup after a successful spend.
+	property boolean expandRequestedRun = false
+
+	property boolean isOpen = false
+
+	property boolean wired = false
+
+	property any cardEntities = nil
+
+	property any inputHandlers = nil
+
+	property any busHandlers = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Server-bus subscriptions are safe at OnBeginPlay; entity wiring is deferred to TryWire
+		-- because the DefaultShow=false group's children aren't instantiated until first Enable=true.
+		log("[UIChoicePopupLogic] OnBeginPlay")
+		self.inputHandlers = {}
+		self.busHandlers = {}
+		self:Subscribe(ChoiceResolvedEvent, self.OnChoiceResolved)
+		self:Subscribe(LootChangedEvent, self.OnLootChanged)
+		self:Subscribe(RerollUsedEvent, self.OnRerollUsed)
+		self:Subscribe(StageEndedEvent, self.OnStageEnded)
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number dt)
+		-- Retry wiring each frame until the popup group has been enabled once and its children exist.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- Wires card slots + control buttons once all required entities are valid (false → retry next frame).
+		if self.cardEntities == nil then
+			self.cardEntities = { self.card1, self.card2, self.card3, self.card4, self.card5 }
+		end
+		for slot = 1, #self.cardEntities do
+			if not isvalid(self.cardEntities[slot]) then
+				return false
+			end
+		end
+		if not isvalid(self.btnReroll) or not isvalid(self.btnExpand) or not isvalid(self.btnJobAdv) then
+			return false
+		end
+		for slot = 1, #self.cardEntities do
+			local capturedSlot = slot
+			self:WireButton(self.cardEntities[slot], function() self:OnCardClicked(capturedSlot) end)
+		end
+		self:WireButton(self.btnReroll, function() self:OnRerollClicked() end)
+		self:WireButton(self.btnExpand, function() self:OnExpandClicked() end)
+		self:WireButton(self.btnJobAdv, function() self:OnJobAdvanceClicked() end)
+		log("[UIChoicePopupLogic] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Mandatory release of every handler connected in OnBeginPlay.
+		if self.inputHandlers ~= nil then
+			for _, rec in ipairs(self.inputHandlers) do
+				if isvalid(rec.target) then
+					rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+				end
+			end
+			self.inputHandlers = nil
+		end
+		if self.busHandlers ~= nil then
+			for _, rec in ipairs(self.busHandlers) do
+				_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+			self.busHandlers = nil
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowChoices(table cards, integer rerollLeft, any canAdvance, any canExpand)
+		-- §4.9 client API; setId rides on every card (GrowthLogic.PresentChoiceSet) for RequestPick.
+		-- canAdvance/canExpand are optional server affordance flags; nil = derive client-side
+		-- (existing two-arg callers keep working — the extra args arrive as nil).
+		self.advanceOverride = canAdvance
+		if self.cardEntities == nil then
+			self.cardEntities = { self.card1, self.card2, self.card3, self.card4, self.card5 }
+		end
+		local count = #cards
+		if count == 0 then
+			log_warning("[UIChoicePopupLogic] ShowChoices called with empty card set")
+			return
+		end
+		if count > #self.cardEntities then
+			log_warning("[UIChoicePopupLogic] card count clamped: " .. count)
+			count = #self.cardEntities
+		end
+		self.currentSetId = cards[1].setId or 0
+		local cardWidth = 300
+		if isvalid(self.cardEntities[1]) then
+			cardWidth = self.cardEntities[1].UITransformComponent.RectSize.x
+		end
+		local step = cardWidth + self.cardSpacing
+		for slot = 1, #self.cardEntities do
+			local cardEntity = self.cardEntities[slot]
+			if isvalid(cardEntity) then
+				if slot <= count then
+					self:FillCard(cardEntity, cards[slot])
+					local cardTransform = cardEntity.UITransformComponent
+					local offsetX = (slot - (count + 1) / 2) * step
+					cardTransform.anchoredPosition = Vector2(offsetX, cardTransform.anchoredPosition.y)
+					cardEntity.Enable = true
+				else
+					cardEntity.Enable = false
+				end
+			end
+		end
+		self.currentSlotCount = count
+		self:UpdateRerollLabel(rerollLeft)
+		self:RefreshAffordances(canExpand)
+		-- Occlusion is reference-counted by the router; only increment on the closed->open transition so
+		-- a back-to-back re-present (two card sets without an intervening close) can't leave a depth the
+		-- single CloseChoices never repays.
+		local wasOpen = self.isOpen
+		self.isOpen = true
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = true
+		end
+		-- This popup self-enables (it does not ride the router modal queue), so it must drive
+		-- HUD occlusion itself or the in-game side-HUDs bleed behind the dimmer.
+		if not wasOpen then
+			_UIRouterLogic:ApplyModalHudOcclusion(true)
+		end
+		log("[UIChoicePopupLogic] show choices: setId=" .. self.currentSetId .. " cards=" .. count .. " rerollLeft=" .. rerollLeft)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseChoices()
+		-- §4.9 client API; also reached via ChoiceResolvedEvent and StageEndedEvent.
+		if not self.isOpen then
+			return
+		end
+		self.isOpen = false
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = false
+		end
+		_UIRouterLogic:ApplyModalHudOcclusion(false)
+		log("[UIChoicePopupLogic] choices closed")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FillCard(Entity cardEntity, table card)
+		-- Renders one §4.9 card {choiceId, kind, name, desc, iconRuid, grade} onto a slot entity.
+		local grade = card.grade or "NORMAL"
+		local nameText = cardEntity:GetChildByName("NameText", false)
+		if isvalid(nameText) then
+			nameText.TextComponent.Text = card.name or ""
+		end
+		local descText = cardEntity:GetChildByName("DescText", false)
+		if isvalid(descText) then
+			descText.TextComponent.Text = card.desc or ""
+		end
+		local gradeText = cardEntity:GetChildByName("GradeText", false)
+		if isvalid(gradeText) then
+			gradeText.TextComponent.Text = grade
+			gradeText.TextComponent.FontColor = self:GetGradeColor(grade)
+		end
+		cardEntity.SpriteGUIRendererComponent.Color = self:GetGradeColor(grade)
+		local icon = cardEntity:GetChildByName("Icon", false)
+		if isvalid(icon) and card.iconRuid ~= nil and card.iconRuid ~= "" then
+			icon.SpriteGUIRendererComponent.ImageRUID = DataRef(card.iconRuid)
+		end
+		local fx = cardEntity:GetChildByName("Fx", false)
+		if isvalid(fx) then
+			-- D7: only EPIC cards run the BurstNova particle.
+			fx.Enable = grade == "EPIC"
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Color GetGradeColor(string grade)
+		-- §7.11 grade palette: NORMAL #9E9E9E / RARE #3B7BFF / EPIC #A24BFF.
+		if grade == "EPIC" then
+			return Color.FromHexCode("#A24BFF")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#3B7BFF")
+		end
+		return Color.FromHexCode("#9E9E9E")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateRerollLabel(integer remaining)
+		-- Reroll button reflects the shared per-stage counter (C-23); 0 disables the button (E9).
+		if not isvalid(self.btnReroll) then
+			return
+		end
+		self.btnReroll.TextComponent.Text = "리롤 (남은 " .. remaining .. "회)"
+		self.btnReroll.ButtonComponent.Enable = remaining > 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAffordances(any canExpandFlag)
+		-- #10 UX: toggle the job-advance / expand buttons by their preconditions so they are not
+		-- always-on. Server still re-validates (RequestJobAdvance / RequestExpandChoice); this only
+		-- makes the affordance visible. Expand is fully derivable client-side (not-yet-expanded +
+		-- enough loot); advance exposure count is server-only, so it honors an explicit server flag
+		-- when given and otherwise stays enabled (server gates via NotifyAdvanceDeferred).
+		if isvalid(self.btnExpand) and isvalid(self.btnExpand.ButtonComponent) then
+			local notExpanded = self.currentSlotCount < _GrowthConfig.EXPANDED_SLOT_COUNT and not self.expandRequestedRun
+			local canExpand
+			if canExpandFlag ~= nil then
+				canExpand = canExpandFlag and notExpanded
+			else
+				canExpand = notExpanded and self.currentLoot >= _GrowthConfig.CHOICE_EXPAND_LOOT_COST
+			end
+			self.btnExpand.ButtonComponent.Enable = canExpand
+		end
+		if isvalid(self.btnJobAdv) and isvalid(self.btnJobAdv.ButtonComponent) then
+			local canAdvance = true
+			if self.advanceOverride ~= nil then
+				canAdvance = self.advanceOverride
+			end
+			self.btnJobAdv.ButtonComponent.Enable = canAdvance
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardClicked(integer slotIndex)
+		-- Pick is server-validated; the popup stays open until ChoiceResolvedEvent confirms.
+		if not self.isOpen then
+			return
+		end
+		log("[UIChoicePopupLogic] pick requested: setId=" .. self.currentSetId .. " slot=" .. slotIndex)
+		_GrowthLogic:RequestPick(self.currentSetId, slotIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRerollClicked()
+		-- C-23: choice rerolls route through the single RerollLogic counter.
+		if not self.isOpen then
+			return
+		end
+		log("[UIChoicePopupLogic] choice reroll requested")
+		_RerollLogic:RequestReroll("choice")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnExpandClicked()
+		-- 3→5 expansion request through the single LootLogic authority (§3/§4.8, C-31):
+		-- it deducts loot, sets expanded=true, and emits ChoiceExpandedEvent → GrowthLogic slotCount=5.
+		if not self.isOpen then
+			return
+		end
+		-- Advisory single-shot: prevent re-enabling on the open popup before the server confirms
+		-- (the spend lands as a LootChangedEvent). The server re-validates via IsChoiceExpanded.
+		self.expandRequestedRun = true
+		if isvalid(self.btnExpand) and isvalid(self.btnExpand.ButtonComponent) then
+			self.btnExpand.ButtonComponent.Enable = false
+		end
+		log("[UIChoicePopupLogic] choice expand requested")
+		_LootLogic:RequestExpandChoice()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnJobAdvanceClicked()
+		-- Exposure/cost validation is server-side; deferral comes back as NotifyAdvanceDeferred toast.
+		if not self.isOpen then
+			return
+		end
+		log("[UIChoicePopupLogic] job advance requested")
+		_GrowthLogic:RequestJobAdvance()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnChoiceResolved(ChoiceResolvedEvent event)
+		-- §3: resolution closes the popup; a queued next set re-opens via a fresh ShowChoices.
+		if not self:IsLocalUser(event.userId) then
+			return
+		end
+		self:CloseChoices()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLootChanged(LootChangedEvent event)
+		-- §3: loot balance drives the advance/expand affordance readout.
+		if not self:IsLocalUser(event.userId) then
+			return
+		end
+		self.currentLoot = event.amount
+		if isvalid(self.lootText) then
+			self.lootText.Text = "전리품 " .. event.amount
+		end
+		-- Re-evaluate the expand button live: loot can cross the cost threshold while the popup
+		-- is open. nil flag = client-side derivation from the freshly cached loot balance.
+		if self.isOpen then
+			self:RefreshAffordances(nil)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRerollUsed(RerollUsedEvent event)
+		if not self:IsLocalUser(event.userId) then
+			return
+		end
+		self:UpdateRerollLabel(event.remaining)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Spec E2/E3: a terminating run force-closes any open choice UI; the server already voided the set.
+		-- R2 run reset: clear the per-run expansion latch so the next run starts unexpanded.
+		self.expandRequestedRun = false
+		self.currentLoot = 0
+		self:CloseChoices()
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsLocalUser(string userId)
+		-- Events are relayed to every client; only the owning client reacts.
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) then
+			return false
+		end
+		return localPlayer.PlayerComponent.UserId == userId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity buttonEntity, any onClick)
+		-- Click + hover SFX wiring (ui-sound.md defaults); handlers tracked for OnEndPlay release.
+		if not isvalid(buttonEntity) then
+			log_warning("[UIChoicePopupLogic] button entity not bound")
+			return
+		end
+		local clickHandler = buttonEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSoundRuid, self.sfxVolume)
+			onClick()
+		end)
+		table.insert(self.inputHandlers, { target = buttonEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = buttonEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSoundRuid, self.sfxVolume)
+		end)
+		table.insert(self.inputHandlers, { target = buttonEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(any eventType, any eventHandler)
+		-- All game events arrive through the ZengardGameLogic client-side bus (§3).
+		table.insert(self.busHandlers, { evType = eventType, evHandler = _ZengardGameLogic:ConnectEvent(eventType, eventHandler) })
+	end
+
+end

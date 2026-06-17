@@ -1,0 +1,33 @@
+@Logic
+script BmBalance extends Logic
+
+	-- MASTER_PLAN §7.10 / spec §3.5: energy [D]
+	property integer ENERGY_MAX = 5
+	property integer ENERGY_REFILL_INTERVAL_SEC = 600
+	property integer ENERGY_COST_STAGE_START = 1
+	property integer ENERGY_COST_RETRY = 1
+	property integer ENERGY_COST_CONTINUE = 1
+	property integer FULL_REFILL_RED_MESO_COST = 1
+
+	-- MASTER_PLAN §7.10 / spec §3.7: reroll cap is placement+choice combined [P 3회 / D 합산]
+	property integer REROLL_PER_STAGE_LIMIT = 3
+
+	-- MASTER_PLAN C-25: initial challenge coin balance [D]
+	property integer CHALLENGE_COIN_INITIAL = 3
+
+	-- MASTER_PLAN §7.10 / spec §3.6: normal-kill meso roll + clear bonus [D]
+	-- (boss drops are owned by MonsterBalance per C-32)
+	property number MESO_DROP_CHANCE_NORMAL = 0.30
+	property integer MESO_DROP_MIN = 1
+	property integer MESO_DROP_MAX = 3
+	property integer MESO_STAGE_CLEAR_BONUS = 50
+
+	method integer GetEnergyCost(string reason)
+		-- Maps the p.18 consume reasons to costs; 0 lets callers deny unknown reasons.
+		if reason == "stage_start" then return self.ENERGY_COST_STAGE_START end
+		if reason == "retry" then return self.ENERGY_COST_RETRY end
+		if reason == "continue" then return self.ENERGY_COST_CONTINUE end
+		return 0
+	end
+
+end

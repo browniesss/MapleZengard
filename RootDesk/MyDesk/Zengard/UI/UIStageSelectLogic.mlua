@@ -1,0 +1,510 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UIStageSelectLogic extends Logic
+
+	property Entity btnBack = "81820d45-d91a-4b2c-a348-973c00a3f11c"
+
+	property Entity btnAdventure = "22ca59fe-5088-4397-b807-da124e0d2c62"
+
+	property TextComponent titleText = "e8d24c8a-0455-49e5-aa5f-b7097e76cffe"
+
+	property TextComponent modeBadgeText = "9b2dbaf6-f003-4f38-a8f2-07926a9230bf"
+
+	property TextComponent noticeText = "e841fc0d-03de-4d73-b9de-b457edb2e28e"
+
+	property Entity nodesPanel = "6fd66d93-f53b-41b7-9b04-1d4aa2e14544"
+
+	property Entity jobPanel = "68b56e57-1523-4134-a144-acd3096cbdb4"
+
+	property Entity skillBtnA = "1935e486-a6e7-4672-8584-665814e06570"
+
+	property Entity skillBtnB = "2497c098-4151-4d65-bf07-cc4ecc34fde4"
+
+	-- Skill section label: doubles as the "pick a job first" hint before a job is chosen (C).
+	property TextComponent skillLabel = "b1911136-c3b4-41af-a1ed-fd3c26acdccf"
+
+	-- Selected-stage info card (defect B): name / id / difficulty / monster composition / boss line.
+	property TextComponent infoName = "59593cc2-37b7-4dc8-b71f-4daa426906f6"
+
+	property TextComponent infoStageId = "bdcde372-4da9-453d-8ff4-570f6c253d01"
+
+	property TextComponent infoDifficulty = "49376100-af86-43ec-b112-b6bca1836568"
+
+	property TextComponent infoComp = "319840f1-ed5d-4eaa-8708-5a7f8a9d92fc"
+
+	property TextComponent infoBoss = "d404b550-e472-436a-900c-db35fb69b6c1"
+
+	property string CLICK_SFX_RUID = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string HOVER_SFX_RUID = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property string currentMode = "STORY"
+
+	property string selectedStageId = ""
+
+	property string selectedJobId = ""
+
+	property string selectedSkillId = ""
+
+	-- two initial skill ids of the selected job (R9 / C-10)
+	property table jobSkillIds = {}
+
+	-- stageId -> boolean from the latest RefreshNodes pass (click guard)
+	property table unlockedMap = {}
+
+	-- { target, evType, evHandler } records released in OnEndPlay
+	property table eventRecords = {}
+
+	property integer refreshTimerId = 0
+
+	-- Deferred entity wiring: this group is DefaultShow=false, so its children only
+	-- instantiate after the router first Enables it. Wiring is retried until then.
+	property boolean wired = false
+
+	method void OnBeginPlay()
+		-- No entity wiring here; deferred to TryWire once the group's children exist.
+		log("[UIStageSelectLogic] OnBeginPlay")
+	end
+
+	method void OnUpdate(number delta)
+		-- One-shot wiring once all bound entities and panel children are valid.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+	end
+
+	method boolean TryWire()
+		-- Require fixed buttons and both panels (children of which are looked up below).
+		if not isvalid(self.btnBack) or not isvalid(self.btnAdventure) then return false end
+		if not isvalid(self.skillBtnA) or not isvalid(self.skillBtnB) then return false end
+		if not isvalid(self.nodesPanel) or not isvalid(self.jobPanel) then return false end
+		-- All job cards and stage nodes must resolve before wiring; otherwise retry next frame.
+		for _, jobId in ipairs(_CombatConfig:GetJobIds()) do
+			if not isvalid(self:GetJobCard(jobId)) then return false end
+		end
+		for _, stageId in ipairs(_StageCatalogLogic:GetStageIds()) do
+			if not isvalid(self:GetNode(stageId)) then return false end
+		end
+		self:WireButton(self.btnBack, function()
+			self:OnBackClicked()
+		end)
+		self:WireButton(self.btnAdventure, function()
+			self:OnAdventureClicked()
+		end)
+		self:WireHover(self.btnAdventure)
+		self:WireButton(self.skillBtnA, function()
+			self:OnSkillClicked(1)
+		end)
+		self:WireButton(self.skillBtnB, function()
+			self:OnSkillClicked(2)
+		end)
+		-- Job cards are DISPLAY-ONLY now (the job is chosen in the lobby character showcase, not here):
+		-- no click handler is wired. Fill each card's name label so it reads as "궁수" etc.
+		for _, jobId in ipairs(_CombatConfig:GetJobIds()) do
+			local card = self:GetJobCard(jobId)
+			if not isvalid(card) then
+				continue
+			end
+			local nameEnt = card:GetChildByName("JobNameText", false)
+			local meta = _CombatConfig:GetJobMeta(jobId)
+			if isvalid(nameEnt) and meta ~= nil then
+				nameEnt.TextComponent.Text = meta.name
+			end
+		end
+		-- Apply the lobby-seeded job highlight now that the cards exist (OnScreenShown may run first).
+		if self.selectedJobId ~= "" then
+			self:ApplyJobReadOnly(self.selectedJobId)
+		end
+		for _, stageId in ipairs(_StageCatalogLogic:GetStageIds()) do
+			local node = self:GetNode(stageId)
+			local capturedStage = stageId
+			self:WireButton(node, function()
+				self:OnNodeClicked(capturedStage)
+			end)
+		end
+		-- Defect C: skills stay hidden until a job is picked.
+		self:RefreshSkillButtons()
+		log("[UIStageSelectLogic] wired")
+		return true
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of handlers and the pending refresh timer.
+		for _, rec in ipairs(self.eventRecords) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.eventRecords = {}
+		if self.refreshTimerId ~= 0 then
+			_TimerService:ClearTimer(self.refreshTimerId)
+			self.refreshTimerId = 0
+		end
+	end
+
+	method void WireButton(Entity target, any onClick)
+		-- Shared click wiring: SFX first, then the captured action.
+		if not isvalid(target) then
+			log_warning("[UIStageSelectLogic] button entity missing")
+			return
+		end
+		local clickHandler = target:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+			onClick()
+		end)
+		table.insert(self.eventRecords, { target = target, evType = ButtonClickEvent, evHandler = clickHandler })
+	end
+
+	method void WireHover(Entity target)
+		-- Hover SFX needs UITouchReceiveComponent on the entity (added by the builder).
+		if not isvalid(target) then
+			return
+		end
+		local hoverHandler = target:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.HOVER_SFX_RUID, 1)
+		end)
+		table.insert(self.eventRecords, { target = target, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	method void OnScreenShown(string modeId)
+		-- Called by UIRouterLogic right after enabling the group (spec §4.3 entry path).
+		self.currentMode = modeId
+		-- Job is chosen in the lobby character showcase; seed it read-only here (skill is the only
+		-- loadout pick left on this prep screen). Re-seeded every entry so it never carries stale state.
+		self:SeedJobFromLobby()
+		local modeCfg = _StageCatalogLogic:GetModeConfig(modeId)
+		if isvalid(self.modeBadgeText) and modeCfg ~= nil then
+			self.modeBadgeText.Text = modeCfg.name
+		end
+		local theme = _StageCatalogLogic:GetTheme("1")
+		if isvalid(self.titleText) and theme ~= nil then
+			self.titleText.Text = "테마 1. " .. theme.name
+		end
+		_ModeStageLogic:RequestProgressSync()
+		self:RefreshNodes()
+		-- Progress sync is async; one delayed refresh picks up the server reply.
+		if self.refreshTimerId ~= 0 then
+			_TimerService:ClearTimer(self.refreshTimerId)
+		end
+		self.refreshTimerId = _TimerService:SetTimerOnce(function()
+			self.refreshTimerId = 0
+			self:RefreshNodes()
+		end, 0.7)
+		log("[UIStageSelectLogic] screen shown: mode=" .. modeId)
+	end
+
+	method void SeedJobFromLobby()
+		-- Pull the lobby-selected job (authoritative), load its two initial skills, default to the first,
+		-- and render the job read-only. A back/retry path could arrive without a lobby pick → fall back
+		-- to the first job so the loadout gate is never permanently stuck.
+		local jobId = _UILobbyLogic:ResolveShowcaseJobId()
+		if jobId == nil or jobId == "" then
+			jobId = _CombatConfig:GetJobIds()[1]
+		end
+		self.selectedJobId = jobId
+		self.jobSkillIds = _SkillDataLogic:GetJobInitialSkillIds(jobId)
+		self.selectedSkillId = self.jobSkillIds[1] or ""
+		self:SetSkillButtonText(self.skillBtnA, self.jobSkillIds[1])
+		self:SetSkillButtonText(self.skillBtnB, self.jobSkillIds[2])
+		self:RefreshSkillButtons()
+		self:ApplyJobReadOnly(jobId)
+		self:ApplySkillVisual()
+		log("[UIStageSelectLogic] job seeded from lobby: " .. jobId)
+	end
+
+	method void ApplyJobReadOnly(string jobId)
+		-- Highlight the lobby-chosen job card and dim the others; the cards are display-only now (job
+		-- is no longer selectable here). Guarded so it is a no-op until the cards have instantiated.
+		for _, id in ipairs(_CombatConfig:GetJobIds()) do
+			local card = self:GetJobCard(id)
+			if isvalid(card) then
+				local cardSprite = card.SpriteGUIRendererComponent
+				if isvalid(cardSprite) then
+					if id == jobId then
+						-- amber highlight + dark-wood dim to match the lobby/result wood theme
+						cardSprite.Color = Color(0.80, 0.52, 0.20, 1)
+					else
+						cardSprite.Color = Color(0.22, 0.15, 0.10, 1)
+					end
+				end
+			end
+		end
+	end
+
+	method Entity GetNode(string stageId)
+		-- Node entities are named "Node_<stageId>" under NodesPanel (authored by the same worker's builder).
+		if not isvalid(self.nodesPanel) then
+			return nil
+		end
+		return self.nodesPanel:GetChildByName("Node_" .. stageId, false)
+	end
+
+	method Entity GetJobCard(string jobId)
+		-- Job cards are named "Job_<jobId>" under JobPanel.
+		if not isvalid(self.jobPanel) then
+			return nil
+		end
+		return self.jobPanel:GetChildByName("Job_" .. jobId, false)
+	end
+
+	method void RefreshNodes()
+		-- D8 unlock rule + §7.1 focus fallback (E11), rendered onto the six fixed nodes.
+		local progress = _ModeStageLogic.ClientProgress or {}
+		local cleared = progress.cleared or {}
+		local bestTime = progress.bestTime or {}
+		local ids = _StageCatalogLogic:GetStageIds()
+		self.unlockedMap = {}
+		for i, id in ipairs(ids) do
+			local unlocked = (i == 1) or (cleared[ids[i - 1]] == true)
+			if self.currentMode ~= "STORY" then
+				unlocked = unlocked and (cleared[id] == true)
+			end
+			self.unlockedMap[id] = unlocked
+		end
+		local focus = progress.lastPlayedStageId
+		if focus == nil or focus == "" or self.unlockedMap[focus] ~= true then
+			focus = ""
+			for _, id in ipairs(ids) do
+				if self.unlockedMap[id] == true and cleared[id] ~= true then
+					focus = id
+					break
+				end
+			end
+			if focus == "" then
+				focus = ids[1]
+			end
+		end
+		if self.selectedStageId == "" or self.unlockedMap[self.selectedStageId] ~= true then
+			self.selectedStageId = focus
+		end
+		for _, id in ipairs(ids) do
+			self:ApplyNodeVisual(id, self.unlockedMap[id] == true, cleared[id] == true, bestTime[id])
+		end
+		self:RefreshNotice()
+		self:ApplyStageInfo(self.selectedStageId)
+		log("[UIStageSelectLogic] nodes refreshed: focus=" .. self.selectedStageId)
+	end
+
+	method void ApplyNodeVisual(string stageId, boolean unlocked, boolean isCleared, any bestMs)
+		-- Lock overlay / maple-leaf clear mark / focus glow / time-attack best record per node.
+		local node = self:GetNode(stageId)
+		if not isvalid(node) then
+			return
+		end
+		local cfg = _StageCatalogLogic:GetStageConfig(stageId)
+		local nameEnt = node:GetChildByName("NameText", false)
+		if isvalid(nameEnt) and cfg ~= nil then
+			nameEnt.TextComponent.Text = cfg.name
+		end
+		local labelEnt = node:GetChildByName("LabelText", false)
+		if isvalid(labelEnt) then
+			labelEnt.TextComponent.Text = "[" .. stageId .. "]"
+		end
+		local lockEnt = node:GetChildByName("LockIcon", false)
+		if isvalid(lockEnt) then
+			lockEnt.Enable = not unlocked
+		end
+		local clearEnt = node:GetChildByName("ClearMark", false)
+		if isvalid(clearEnt) then
+			clearEnt.Enable = isCleared
+		end
+		local bestEnt = node:GetChildByName("BestText", false)
+		if isvalid(bestEnt) then
+			if self.currentMode == "TIME_ATTACK" and bestMs ~= nil then
+				bestEnt.TextComponent.Text = self:FormatMs(bestMs)
+			else
+				bestEnt.TextComponent.Text = ""
+			end
+		end
+		local nodeSprite = node.SpriteGUIRendererComponent
+		if isvalid(nodeSprite) then
+			if not unlocked then
+				nodeSprite.Color = Color(0.4, 0.4, 0.4, 1)
+			elseif stageId == self.selectedStageId then
+				nodeSprite.Color = Color(0.72, 1, 0.75, 1)
+			else
+				nodeSprite.Color = Color(1, 1, 1, 1)
+			end
+		end
+	end
+
+	method string FormatMs(integer ms)
+		-- mm:ss.cc display for time-attack best records (spec §4.3).
+		local totalSec = math.floor(ms / 1000)
+		local m = math.floor(totalSec / 60)
+		local s = totalSec % 60
+		local cs = math.floor((ms % 1000) / 10)
+		return string.format("%02d:%02d.%02d", m, s, cs)
+	end
+
+	method void RefreshNotice()
+		-- Companion pre-entry notice for the focused stage (C-10 / MASTER_PLAN §2.2).
+		if not isvalid(self.noticeText) then
+			return
+		end
+		local notice = _CompanionLogic:GetStageCompanionNotice(self.selectedStageId)
+		self.noticeText.Text = notice or ""
+	end
+
+	method void OnNodeClicked(string stageId)
+		-- Locked nodes only toast; selection re-renders focus + notice.
+		if self.unlockedMap[stageId] ~= true then
+			_UIToastLogic:ShowMessage("아직 잠긴 스테이지입니다")
+			return
+		end
+		self.selectedStageId = stageId
+		log("[UIStageSelectLogic] stage selected: " .. stageId)
+		self:RefreshNodes()
+	end
+
+	method void SetSkillButtonText(Entity btn, any skillId)
+		-- Skill button labels come from the SkillDataLogic catalog (displayName).
+		if not isvalid(btn) then
+			return
+		end
+		-- No job picked yet → hide the skill button entirely instead of showing a "-" placeholder
+		-- (the skillLabel already prompts "직업을 먼저 선택하세요").
+		if skillId == nil then
+			btn.Enable = false
+			return
+		end
+		btn.Enable = true
+		local rec = _SkillDataLogic:GetSkillData(skillId)
+		if rec ~= nil then
+			btn.TextComponent.Text = rec.displayName
+		else
+			btn.TextComponent.Text = tostring(skillId)
+		end
+	end
+
+	method void OnSkillClicked(integer slot)
+		-- 2-choose-1 toggle between the job's two initial skills.
+		local skillId = self.jobSkillIds[slot]
+		if skillId == nil then
+			_UIToastLogic:ShowMessage("직업을 먼저 선택해 주세요")
+			return
+		end
+		self.selectedSkillId = skillId
+		self:ApplySkillVisual()
+		log("[UIStageSelectLogic] skill selected: " .. skillId)
+	end
+
+	method void ApplySkillVisual()
+		-- Green tint marks the currently picked skill button.
+		self:TintSkillButton(self.skillBtnA, self.jobSkillIds[1])
+		self:TintSkillButton(self.skillBtnB, self.jobSkillIds[2])
+	end
+
+	method void TintSkillButton(Entity btn, any skillId)
+		-- Tints the currently picked skill button (amber) vs the unpicked one (dark wood).
+		if not isvalid(btn) then
+			return
+		end
+		local btnSprite = btn.SpriteGUIRendererComponent
+		if not isvalid(btnSprite) then
+			return
+		end
+		if skillId ~= nil and skillId == self.selectedSkillId then
+			-- amber highlight + dark-wood dim to match the lobby/result wood theme
+			btnSprite.Color = Color(0.80, 0.52, 0.20, 1)
+		else
+			btnSprite.Color = Color(0.22, 0.15, 0.10, 1)
+		end
+	end
+
+	method void RefreshSkillButtons()
+		-- Job now always arrives pre-seeded from the lobby (SeedJobFromLobby), so hasJob is normally
+		-- true and the 2-choose-1 skill buttons are shown. The empty branch is a defensive fallback only
+		-- (e.g. a future entry path without a lobby pick); it points the player back to the lobby.
+		local hasJob = (self.selectedJobId ~= "")
+		if isvalid(self.skillBtnA) then
+			self.skillBtnA.Enable = hasJob
+		end
+		if isvalid(self.skillBtnB) then
+			self.skillBtnB.Enable = hasJob
+		end
+		if isvalid(self.skillLabel) then
+			if hasJob then
+				self.skillLabel.Text = "시작 스킬 선택"
+			else
+				self.skillLabel.Text = "로비에서 직업을 선택해 주세요"
+			end
+		end
+	end
+
+	method void ApplyStageInfo(string stageId)
+		-- Defect B: fill the left card with the selected stage's name / id / difficulty / composition / boss.
+		local cfg = _StageCatalogLogic:GetStageConfig(stageId)
+		if cfg == nil then
+			return
+		end
+		if isvalid(self.infoName) then
+			self.infoName.Text = cfg.name
+		end
+		if isvalid(self.infoStageId) then
+			self.infoStageId.Text = "스테이지 [" .. stageId .. "]"
+		end
+		if isvalid(self.infoDifficulty) then
+			-- Lower failThreshold = tighter board = harder; expose both numbers plainly.
+			self.infoDifficulty.Text = "난이도 한계 " .. cfg.failThreshold .. " · 젠당 " .. cfg.monstersPerZen .. "마리"
+		end
+		if isvalid(self.infoComp) then
+			self.infoComp.Text = self:FormatComposition(cfg.spawnWeights)
+		end
+		if isvalid(self.infoBoss) then
+			self.infoBoss.Text = cfg.bossZen .. "젠: 보스 머쉬맘"
+		end
+	end
+
+	method string FormatComposition(table spawnWeights)
+		-- Weights -> "이름 NN%" lines, ordered by descending weight for readability.
+		local rows = {}
+		local total = 0
+		for _, w in pairs(spawnWeights) do
+			total = total + w
+		end
+		if total <= 0 then
+			return "-"
+		end
+		for typeId, w in pairs(spawnWeights) do
+			local data = _MonsterBalance:GetTypeData(typeId)
+			local label = typeId
+			if data ~= nil and data.displayName ~= nil then
+				label = data.displayName
+			end
+			local pct = math.floor((w / total) * 100 + 0.5)
+			table.insert(rows, { label = label, pct = pct, w = w })
+		end
+		table.sort(rows, function(a, c)
+			return a.w > c.w
+		end)
+		local lines = {}
+		for _, r in ipairs(rows) do
+			table.insert(lines, r.label .. " " .. r.pct .. "%")
+		end
+		return table.concat(lines, "\n")
+	end
+
+	method void OnAdventureClicked()
+		-- E13: incomplete loadout never reaches the server; the rest is server-validated (§7.2).
+		if self.selectedStageId == "" or self.selectedJobId == "" or self.selectedSkillId == "" then
+			_UIToastLogic:ShowMessage("직업과 스킬을 선택해 주세요")
+			return
+		end
+		if self.unlockedMap[self.selectedStageId] ~= true then
+			_UIToastLogic:ShowMessage("아직 잠긴 스테이지입니다")
+			return
+		end
+		log("[UIStageSelectLogic] enter requested: stage=" .. self.selectedStageId .. " mode=" .. self.currentMode .. " job=" .. self.selectedJobId .. " skill=" .. self.selectedSkillId)
+		_ModeStageLogic:RequestEnterStage(self.currentMode, self.selectedStageId, self.selectedJobId, self.selectedSkillId)
+	end
+
+	method void OnBackClicked()
+		-- Spec §4.1: StageSelect back returns to the lobby.
+		log("[UIStageSelectLogic] back to lobby")
+		_UIRouterLogic:GoLobby()
+	end
+
+end

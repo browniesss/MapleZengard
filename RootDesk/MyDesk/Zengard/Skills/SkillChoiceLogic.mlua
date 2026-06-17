@@ -1,0 +1,233 @@
+@Logic
+script SkillChoiceLogic extends Logic
+
+	-- userId → jobId cache fed by JobSelectedEvent (§3 receiver contract).
+	property any userJobs = nil
+
+	property any jobSelectedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Cache wiring: JobSelectedEvent keeps the per-user job in sync with JobLogic.
+		log("[SkillChoice] OnBeginPlay")
+		if self.userJobs == nil then
+			self.userJobs = {}
+		end
+		self.jobSelectedHandler = _ZengardGameLogic:ConnectEvent(JobSelectedEvent, self.OnJobSelected)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Release the bus subscription at world session end.
+		if self.jobSelectedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(JobSelectedEvent, self.jobSelectedHandler)
+			self.jobSelectedHandler = nil
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnJobSelected(any event)
+		-- Cache the job so candidate rolls avoid a JobLogic round-trip per call.
+		if self.userJobs == nil then
+			self.userJobs = {}
+		end
+		self.userJobs[event.userId] = event.jobId
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetUserJob(string userId)
+		-- Cached job first, JobLogic as the authoritative fallback ("" = not selected).
+		if self.userJobs ~= nil and self.userJobs[userId] ~= nil then
+			return self.userJobs[userId]
+		end
+		return _JobLogic:GetJob(userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetInitialChoices(string userId, string jobId)
+		-- DEAD CODE (C-10): the initial 2-pick moved to the StageSelect screen; no in-project caller.
+		-- Kept to honor the §4.5 public API contract — always two attack-skill NEW choices for the picked job (R1/R2).
+		local choices = {}
+		for _, skillId in ipairs(_SkillDataLogic:GetJobInitialSkillIds(jobId)) do
+			table.insert(choices, { skillId = skillId, kind = "NEW" })
+		end
+		log("[SkillChoice] initial choices(" .. userId .. "/" .. jobId .. "): " .. self:DescribeChoices(choices))
+		return choices
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsTierEligible(string userId, table skillData)
+		-- Tier/branch gate (C-26): tier-2 skills need GrowthLogic jobTier ≥ 2 and a matching branch.
+		if skillData.jobTier <= 1 then
+			return true
+		end
+		local growth = _GrowthLogic:GetJobTier(userId)
+		if growth == nil or growth.tier == nil or growth.tier < skillData.jobTier then
+			return false
+		end
+		-- Empty branch means the first tier-2 pick has not fixed the route yet — all branches open.
+		if growth.branch == nil or growth.branch == "" or skillData.advRoute == "" then
+			return true
+		end
+		return skillData.advRoute == growth.branch
+	end
+
+	@ExecSpace("ServerOnly")
+	method table CollectOwnerCandidates(string ownerId, string job, boolean tierGated, string ownerLabel)
+		-- NEW (unowned, pool-eligible) + LEVELUP candidates for one owner.
+		-- tierGated: base char honors GrowthLogic jobTier; companions are tier-1 only (no companion growth state).
+		local owned = _SkillInventoryLogic:GetOwnedSkills(ownerId)
+		local ownedMap = {}
+		for _, entry in ipairs(owned) do
+			ownedMap[entry.skillId] = entry.level
+		end
+		local out = {}
+		if #owned < _SkillDataLogic.MAX_OWNED_SKILLS then
+			for _, skillData in ipairs(_SkillDataLogic:GetJobSkillPool(job)) do
+				local eligible = false
+				if tierGated then
+					eligible = self:IsTierEligible(ownerId, skillData)
+				else
+					eligible = skillData.jobTier <= 1
+				end
+				if ownedMap[skillData.skillId] == nil and eligible then
+					table.insert(out, { skillId = skillData.skillId, kind = "NEW", ownerId = ownerId, ownerLabel = ownerLabel })
+				end
+			end
+		end
+		for _, entry in ipairs(owned) do
+			if entry.level < _SkillDataLogic.SKILL_MAX_LEVEL then
+				table.insert(out, { skillId = entry.skillId, kind = "LEVELUP", ownerId = ownerId, ownerLabel = ownerLabel })
+			end
+		end
+		return out
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetChoiceCandidates(string userId, integer slotCount)
+		-- Levelup candidate roll (§7.1): NEW + LEVELUP pool, then a 30% fusion slot substitution.
+		-- p.15: joined companions share the same weighted pool, each candidate tagged with ownerId+label.
+		local job = self:GetUserJob(userId)
+		local pool = self:CollectOwnerCandidates(userId, job, true, "")
+
+		-- Companion skill cards (p.15 "동료 또한 본캐릭터와 같이 스킬 성장 가능").
+		for _, companion in ipairs(_CompanionLogic:GetActiveCompanions()) do
+			if companion.baseJob ~= "" then
+				for _, candidate in ipairs(self:CollectOwnerCandidates(companion.companionId, companion.baseJob, false, companion.displayLabel)) do
+					table.insert(pool, candidate)
+				end
+			end
+		end
+
+		-- Uniform weights → Fisher-Yates shuffle gives sampling without replacement (E4).
+		for i = #pool, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			pool[i], pool[j] = pool[j], pool[i]
+		end
+		local result = {}
+		for i = 1, slotCount do
+			if pool[i] == nil then
+				break
+			end
+			table.insert(result, pool[i])
+		end
+
+		-- Fusion slot substitution (R10, D5) — base char only; replaces a base-char slot.
+		local activated = _SkillFusionLogic:GetActivatedRecipeIds(userId)
+		if #activated > 0 and _UtilLogic:RandomDouble() < _SkillDataLogic.FUSION_CHOICE_CHANCE then
+			local baseSlots = {}
+			for i, candidate in ipairs(result) do
+				if candidate.ownerId == userId then
+					table.insert(baseSlots, i)
+				end
+			end
+			if #baseSlots > 0 then
+				local recipeId = activated[_UtilLogic:RandomIntegerRange(1, #activated)]
+				local recipe = _SkillDataLogic:GetRecipe(recipeId)
+				local slot = baseSlots[_UtilLogic:RandomIntegerRange(1, #baseSlots)]
+				result[slot] = { skillId = recipe.result, kind = "FUSION", recipeId = recipeId, ownerId = userId, ownerLabel = "" }
+			end
+		end
+
+		log("[SkillChoice] candidates(" .. userId .. ", slots=" .. tostring(slotCount) .. "): " .. self:DescribeChoices(result))
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ApplyChoice(string userId, table choice)
+		-- Pick-time revalidation (E2/E7); false tells the caller to re-roll the slot.
+		-- ownerId routes the grant to the base char (userId) or a companion (companionId); nil = base char (back-compat).
+		if choice == nil or choice.skillId == nil or choice.kind == nil then
+			log_warning("[SkillChoice] ApplyChoice: malformed choice (user=" .. userId .. ")")
+			return false
+		end
+		if not _ZengardGameLogic:IsInStage() then
+			log("[SkillChoice] ApplyChoice rejected (stage inactive): " .. choice.skillId)
+			return false
+		end
+
+		local ownerId = userId
+		local isCompanion = false
+		if choice.ownerId ~= nil and choice.ownerId ~= "" then
+			ownerId = choice.ownerId
+			isCompanion = ownerId ~= userId
+		end
+
+		if choice.kind == "NEW" then
+			local skillData = _SkillDataLogic:GetSkillData(choice.skillId)
+			if skillData == nil or skillData.kind == "FUSION" then
+				return false
+			end
+			if _SkillInventoryLogic:GetSkillLevel(ownerId, choice.skillId) > 0 then
+				return false
+			end
+			if #_SkillInventoryLogic:GetOwnedSkills(ownerId) >= _SkillDataLogic.MAX_OWNED_SKILLS then
+				return false
+			end
+			-- Companions have no GrowthLogic tier state, so they are restricted to tier-1 skills.
+			if isCompanion then
+				if skillData.jobTier > 1 then
+					return false
+				end
+			elseif not self:IsTierEligible(ownerId, skillData) then
+				return false
+			end
+			_SkillInventoryLogic:GrantSkill(ownerId, choice.skillId)
+			log("[SkillChoice] ApplyChoice NEW: " .. ownerId .. " " .. choice.skillId)
+			return true
+		elseif choice.kind == "LEVELUP" then
+			local leveled = _SkillInventoryLogic:LevelUpSkill(ownerId, choice.skillId)
+			log("[SkillChoice] ApplyChoice LEVELUP: " .. ownerId .. " " .. choice.skillId .. " ok=" .. tostring(leveled))
+			return leveled
+		elseif choice.kind == "FUSION" then
+			if choice.recipeId == nil then
+				return false
+			end
+			-- Fusion candidates are emitted for the base char only (companions carry no activated recipes).
+			local fused = _SkillFusionLogic:TryCompleteFusion(ownerId, choice.recipeId)
+			log("[SkillChoice] ApplyChoice FUSION: " .. ownerId .. " " .. tostring(choice.recipeId) .. " ok=" .. tostring(fused))
+			return fused
+		end
+		log_warning("[SkillChoice] ApplyChoice: unknown kind " .. tostring(choice.kind))
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method string DescribeChoices(table choices)
+		-- Compact "skillId(kind)" join for V7 log verification (passives must be visible).
+		local parts = {}
+		for _, choice in ipairs(choices) do
+			table.insert(parts, choice.skillId .. "(" .. choice.kind .. ")")
+		end
+		return table.concat(parts, ", ")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetUser(string userId)
+		-- Run teardown: cascaded from SkillInventoryLogic.ResetUser; clears the job cache.
+		if self.userJobs ~= nil then
+			self.userJobs[userId] = nil
+		end
+	end
+
+end

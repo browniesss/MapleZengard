@@ -1,0 +1,12 @@
+@Event
+script LootChangedEvent extends EventType
+
+	property string userId = ""
+
+	property integer amount = 0
+
+	property integer delta = 0
+
+	property string reason = ""
+
+end

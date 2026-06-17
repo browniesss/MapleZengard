@@ -1,0 +1,92 @@
+@Logic
+script EnergyLogic extends Logic
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Lazy time-based refill: recomputed on access, no polling timers (spec §7.3).
+		log("[EnergyLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshEnergy(string userId)
+		-- Applies elapsed refills in place; partial progress survives via lastRefillAt advance.
+		local energyState = _PlayerDataLogic:GetEnergyState(userId)
+		local nowSec = _PlayerDataLogic:GetUtcNowSec()
+		if energyState.amount >= _BmBalance.ENERGY_MAX then
+			-- Refill timer stays parked while full (spec §7.3).
+			energyState.lastRefillAt = nowSec
+			return
+		end
+		local gained = math.floor((nowSec - energyState.lastRefillAt) / _BmBalance.ENERGY_REFILL_INTERVAL_SEC)
+		if gained <= 0 then return end
+		energyState.amount = math.min(_BmBalance.ENERGY_MAX, energyState.amount + gained)
+		energyState.lastRefillAt += gained * _BmBalance.ENERGY_REFILL_INTERVAL_SEC
+		_PlayerDataLogic:MarkMetaDirty(userId)
+		log("[EnergyLogic] energy refilled: gained=" .. tostring(gained) .. " amount=" .. tostring(energyState.amount) .. " userId=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetEnergy(string userId)
+		-- Always returns the lazy-refill-adjusted amount (§4.8).
+		self:RefreshEnergy(userId)
+		return _PlayerDataLogic:GetEnergyState(userId).amount
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetNextRefillRemainingSec(string userId)
+		-- 0 while full; otherwise seconds until the next +1.
+		self:RefreshEnergy(userId)
+		local energyState = _PlayerDataLogic:GetEnergyState(userId)
+		if energyState.amount >= _BmBalance.ENERGY_MAX then return 0 end
+		local nowSec = _PlayerDataLogic:GetUtcNowSec()
+		local remaining = _BmBalance.ENERGY_REFILL_INTERVAL_SEC - (nowSec - energyState.lastRefillAt)
+		return math.max(0, remaining)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TryConsumeEnergy(string userId, string reason)
+		-- reason: "stage_start"|"retry"|"continue" (§4.8). false blocks stage entry (E6).
+		local cost = _BmBalance:GetEnergyCost(reason)
+		if cost <= 0 then
+			log_warning("[EnergyLogic] invalid consume reason: " .. tostring(reason))
+			return false
+		end
+		self:RefreshEnergy(userId)
+		local energyState = _PlayerDataLogic:GetEnergyState(userId)
+		if energyState.amount < cost then
+			log("[EnergyLogic] energy denied: reason=" .. reason .. " amount=" .. tostring(energyState.amount) .. " userId=" .. userId)
+			return false
+		end
+		if energyState.amount >= _BmBalance.ENERGY_MAX then
+			-- Leaving the full state: the refill timer restarts from this consumption (spec §7.3).
+			energyState.lastRefillAt = _PlayerDataLogic:GetUtcNowSec()
+		end
+		energyState.amount -= cost
+		_PlayerDataLogic:MarkMetaDirty(userId)
+		_PlayerDataLogic:QueuePush(userId)
+		log("[EnergyLogic] energy consumed: reason=" .. reason .. " remaining=" .. tostring(energyState.amount) .. " userId=" .. userId)
+		return true
+	end
+
+	@ExecSpace("Server")
+	method void RequestFullRefillByRedMeso()
+		-- BM assist (p.18 R15): red meso → full refill, with server-side double guards.
+		local userId = senderUserId
+		self:RefreshEnergy(userId)
+		local energyState = _PlayerDataLogic:GetEnergyState(userId)
+		if energyState.amount >= _BmBalance.ENERGY_MAX then
+			log("[EnergyLogic] full refill skipped: already full, userId=" .. userId)
+			return
+		end
+		if not _PlayerDataLogic:TrySpendCurrency(userId, "redMeso", _BmBalance.FULL_REFILL_RED_MESO_COST) then
+			log("[EnergyLogic] full refill denied: not enough red meso, userId=" .. userId)
+			return
+		end
+		energyState.amount = _BmBalance.ENERGY_MAX
+		energyState.lastRefillAt = _PlayerDataLogic:GetUtcNowSec()
+		_PlayerDataLogic:MarkMetaDirty(userId)
+		_PlayerDataLogic:QueuePush(userId)
+		log("[EnergyLogic] energy full refill by red meso: userId=" .. userId)
+	end
+
+end

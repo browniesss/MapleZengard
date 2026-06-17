@@ -1,0 +1,402 @@
+@Logic
+script CombatFxLogic extends Logic
+
+	property string castSoundRuid = "d119ae57826a4b44ae0b77d7e15c4faf"
+
+	property string hitSoundRuid = "9997f3715d3b40859447314dabe52619"
+
+	-- Real MapleStory skill animationclip (category=skill) played AT the target cell for ranged/
+	-- targeted skills, replacing the made-up BasicParticle palette. Verified live via
+	-- asset_get_account_resource_metadata_bulk (resultCode 0, resourceType animationclip).
+	-- One entry per skill fxKey; unmapped skills keep the BasicParticle fallback. Design-confirmed
+	-- RUID/scale plug in here only — no other site needs to change.
+	-- Tuned for the 150x190px Magic Claw clip (=1.5x1.9 world units at 100px/unit). The clip has
+	-- heavy transparent padding, so the visible claw art is well under the frame; 1.5 reads clearly on
+	-- the monster's cell (verified in play: 1.0 was too faint, 2.5 swamped neighbours).
+	property number impactEffectScale = 1.5
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Preload the damage skin so the first cast does not hitch (E-15).
+		log("[CombatFxLogic] OnBeginPlay")
+		_DamageSkinService:PreloadAsync(_CombatConfig.DAMAGE_SKIN_RUID, function(success)
+			if not success then
+				log_warning("[CombatFxLogic] damage skin preload failed")
+			end
+		end)
+	end
+
+	method any ResolveFxInstigator()
+		-- PlayBasicParticle returns 0 (silent failure, renders nothing) when instigator is nil.
+		-- A valid client entity is required; it also supplies the map context for the burst.
+		local player = _UserService.LocalPlayer
+		if isvalid(player) then
+			return player
+		end
+		return nil
+	end
+
+	method string ResolveImpactEffectRuid(string fxKey)
+		-- Skill fxKey -> real MapleStory animationclip(category=skill) RUID. Returns "" when no real
+		-- effect is mapped, signalling the BasicParticle fallback. Every castable skill is mapped here;
+		-- all RUIDs are the design-verified table (thumbnail visual check + resultCode 0). Do NOT invent
+		-- new RUIDs — an unverified RUID renders nothing (dead-RUID silent failure).
+		-- All RUIDs below are named MapleStory skill-pack animationclips, re-sourced because the prior
+		-- (mostly unnamed) clips did not read as the real skills (user report). Each was confirmed to
+		-- render in-engine (PlayEffect serial != 0) and the high-traffic ones were thumbnail-verified.
+		-- Warrior
+		if fxKey == "warrior_power_strike" then
+			return "dad03b3a528348bf98295b01edd621a4"
+		elseif fxKey == "warrior_slash_blast" then
+			return "3ebd5d6967394c2589408f69c2bc5c54"
+		elseif fxKey == "warrior_power_blast" then
+			return "4987142bef4b484298eb29c6f64b2f1e"
+		-- Archer
+		elseif fxKey == "archer_arrow_blow" then
+			-- 애로우 블로우 (skill 3001004) ball clip — thumbnail-verified flying arrow.
+			return "64f775829e234918bd65e9d22214bb06"
+		elseif fxKey == "archer_double_shot" then
+			-- Double Shot fires the same arrows; reuse the Arrow Blow ball clip.
+			return "64f775829e234918bd65e9d22214bb06"
+		elseif fxKey == "archer_ice_shot" then
+			return "b40d0b0bdce54010bfd3658e8549e073"
+		elseif fxKey == "archer_double_ice_shot" then
+			-- Shares the Ice Shot ball clip (fusion).
+			return "b40d0b0bdce54010bfd3658e8549e073"
+		-- Mage
+		elseif fxKey == "mage_energy_bolt" then
+			return "ba512e50ddad4231bd6093dd07afc00e"
+		elseif fxKey == "mage_magic_claw" then
+			-- Named "매직 클로" skill pack (80003294/hit) — thumbnail-verified blue claw-slash, the
+			-- authentic MapleStory Magic Claw asset (replaces the prior unnamed clip the user flagged).
+			return "598d2d1859e84eaab18ae460a0a1e0a4"
+		elseif fxKey == "mage_energy_claw" then
+			-- Fusion claw reuses the Magic Claw slash.
+			return "598d2d1859e84eaab18ae460a0a1e0a4"
+		elseif fxKey == "mage_fire_arrow" then
+			return "ca66b992cea9400eab7d6d202bcb7a60"
+		elseif fxKey == "mage_thunder_bolt" then
+			return "df732e3d54da4d9bb5b97ca0f938b56f"
+		elseif fxKey == "mage_meteor" then
+			return "9dadb8bef6954b6f9bcff0d2a581a938"
+		elseif fxKey == "mage_poison_mist" then
+			return "b0d47a8948314a5ea04a00690d921fc3"
+		elseif fxKey == "mage_chain_lightning" then
+			return "fa693d02e71841b2bf541bcdbdd84242"
+		elseif fxKey == "mage_blizzard" then
+			return "96b261657b0c4aa792bd6f3e7d6c6681"
+		elseif fxKey == "mage_heal" then
+			return "93f3cd96f3b1432693e5d2765d396338"
+		elseif fxKey == "mage_angel_ray" then
+			return "e86eef7f960146fea646300653347c2e"
+		-- Thief
+		elseif fxKey == "thief_double_stab" then
+			return "c13c85382144469daf33bf2c9bae7e5e"
+		elseif fxKey == "thief_lucky_seven" then
+			return "458e72f0720a4584a9a7fc3642b6e601"
+		elseif fxKey == "thief_triple_seven" then
+			return "63af9dc845db4da2960172417b3eee5d"
+		end
+		return ""
+	end
+
+	method number ResolveImpactEffectScale(string fxKey)
+		-- Per-skill uniform scale for the real effect clip, sized against the 0.8u (~80px) board cell.
+		-- Values come straight from DESIGN-FX-HANDOFF.md (§B init-scale column + §C outliers), so each
+		-- clip is sized to its own source-pixel dimensions instead of one coarse per-shape number. The
+		-- §C outliers are the clips that would otherwise overrun the board: meteor (300x257 -> 748x764),
+		-- chain lightning (1385x90 -> 1400x108 ultra-wide), angel ray (450x855 -> 756x896 ultra-tall),
+		-- poison mist / lucky seven (tiny frames that must be scaled UP), and power blast (445x262 ->
+		-- 604x284 wide). Unmapped fxKeys fall back
+		-- to the magic-claw baseline (self.impactEffectScale). Single table lookup per Design §E.2.
+		-- Scales re-derived for the new clips' source pixel sizes (target ~fills the 0.8u/~80px cell;
+		-- projectile streaks sized by cross-axis; oversized AoE capped so it doesn't swamp neighbors).
+		local scaleByFxKey = {
+			["warrior_power_strike"] = 0.85,
+			["warrior_slash_blast"] = 0.85,
+			["warrior_power_blast"] = 0.6,
+			["archer_arrow_blow"] = 1.3,
+			["archer_double_shot"] = 1.3,
+			["archer_ice_shot"] = 0.65,
+			["archer_double_ice_shot"] = 0.65,
+			["mage_energy_bolt"] = 0.75,
+			["mage_magic_claw"] = 1.0,
+			["mage_energy_claw"] = 1.0,
+			["mage_fire_arrow"] = 1.0,
+			["mage_thunder_bolt"] = 0.7,
+			["mage_meteor"] = 0.85,
+			["mage_poison_mist"] = 0.45,
+			["mage_chain_lightning"] = 0.55,
+			["mage_blizzard"] = 0.45,
+			["mage_heal"] = 1.0,
+			["mage_angel_ray"] = 0.35,
+			["thief_double_stab"] = 0.6,
+			["thief_lucky_seven"] = 1.85,
+			["thief_triple_seven"] = 1.25,
+		}
+		local s = scaleByFxKey[fxKey]
+		if s ~= nil then
+			return s
+		end
+		-- Unmapped fxKey: the magic-claw baseline reads well as a generic fallback.
+		return self.impactEffectScale
+	end
+
+	method any ResolveParticleType(string fxKey)
+		-- Skill→particle palette (BasicParticle, no RUID). Shared by cast FX and target-impact FX.
+		if fxKey == "mage_thunder_bolt" then
+			return BasicParticleType.LightningStrikeSharp
+		elseif fxKey == "mage_fire_arrow" then
+			return BasicParticleType.FireBall
+		elseif string.find(fxKey, "warrior_", 1, true) == 1 then
+			return BasicParticleType.SparkRadialExplosion
+		elseif string.find(fxKey, "archer_", 1, true) == 1 then
+			return BasicParticleType.PillarBurst
+		elseif string.find(fxKey, "mage_", 1, true) == 1 then
+			return BasicParticleType.Nova
+		elseif string.find(fxKey, "thief_", 1, true) == 1 then
+			return BasicParticleType.StarVortex
+		end
+		return BasicParticleType.CircleBurst
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayImpactFx(string fxKey, integer col, integer row)
+		-- Skill-specific burst AT the target cell so ranged/targeted skills (magic claw, lucky
+		-- seven) read as landing on the monster, not just firing from the caster's feet.
+		-- Particles/sound are client-side; skip the server leg of the Multicast entirely.
+		if not isvalid(_UserService.LocalPlayer) then
+			return
+		end
+		local inst = self:ResolveFxInstigator()
+		local pos = _BoardLogic:CellToWorld(col, row)
+		local effectRuid = self:ResolveImpactEffectRuid(fxKey)
+		if effectRuid ~= "" then
+			-- Real skill animationclip at the target cell. Renders above the board pieces; isLoop=false
+			-- plays once then auto-disposes (no serial bookkeeping). PlayEffect returns 0 on failure
+			-- (nil instigator / dead RUID) — log so a silent render-0 is caught at playtest.
+			local options = {
+				["SortingLayer"] = _BoardConfig.BOARD_SORTING_LAYER,
+				["OrderInLayer"] = _BoardConfig:GetOrderInLayer(row) + 100,
+				-- map01 has a single Map Layer, so the engine otherwise snaps the effect into MapLayer0
+				-- alongside the board art and clamps its order; IgnoreMapLayerCheck lets OrderInLayer+100
+				-- actually draw the skill animation on top instead of being occluded by the board.
+				["IgnoreMapLayerCheck"] = _BoardConfig.BOARD_FX_IGNORE_MAP_LAYER_CHECK,
+			}
+			local s = self:ResolveImpactEffectScale(fxKey)
+			local scale = Vector3(s, s, 1)
+			local serial = _EffectService:PlayEffect(effectRuid, inst, pos, 0, scale, false, options)
+			log("[CombatFxLogic] impact effect: " .. fxKey .. " ruid=" .. effectRuid .. " serial=" .. tostring(serial) .. " at (" .. tostring(col) .. "," .. tostring(row) .. ")")
+		else
+			-- No real effect mapped for this skill yet: keep the BasicParticle fallback.
+			local particleType = self:ResolveParticleType(fxKey)
+			_ParticleService:PlayBasicParticle(particleType, inst, pos, 0, Vector3(1, 1, 1), false, nil)
+		end
+		if self.hitSoundRuid ~= "" then
+			_SoundService:PlaySoundAtPos(self.hitSoundRuid, pos, nil, 1)
+		end
+	end
+
+	method table BuildBoardFxOptions(integer row, boolean flipX, boolean flipY)
+		-- Shared board-FX options: same SortingLayer/OrderInLayer(+100)/IgnoreMapLayerCheck contract as
+		-- PlayImpactFx, plus FlipX/FlipY for direction-mirrored clips (LINE shots). OrderInLayer is keyed
+		-- to the cell's own row so each path cell draws at the correct pseudo-depth above the board art.
+		local options = {
+			["SortingLayer"] = _BoardConfig.BOARD_SORTING_LAYER,
+			["OrderInLayer"] = _BoardConfig:GetOrderInLayer(row) + 100,
+			["IgnoreMapLayerCheck"] = _BoardConfig.BOARD_FX_IGNORE_MAP_LAYER_CHECK,
+		}
+		if flipX then
+			options["FlipX"] = true
+		end
+		if flipY then
+			options["FlipY"] = true
+		end
+		return options
+	end
+
+	method table ResolveLineOrientation(string fxKey, string direction)
+		-- LINE clips (arrow/bolt) are authored pointing one way; align them to the cast direction.
+		-- Horizontal: LEFT/RIGHT mirror via FlipX (no rotation). Vertical: UP/DOWN rotate +/-90 deg.
+		-- Every /ball and /flipball projectile clip is authored facing LEFT (MSW asset convention),
+		-- so LEFT is the un-flipped orientation and RIGHT is the direction that needs FlipX (Design §D).
+		local defaultFacesRight = false
+		local zRotation = 0.0
+		local flipX = false
+		if direction == "RIGHT" then
+			flipX = not defaultFacesRight
+		elseif direction == "LEFT" then
+			flipX = defaultFacesRight
+		elseif direction == "UP" then
+			-- Rotate the left-facing clip a quarter turn to point up; the rotation alone orients the
+			-- bolt, so FlipX stays false (Design §D).
+			zRotation = 90.0
+		elseif direction == "DOWN" then
+			zRotation = -90.0
+		end
+		return { flipX = flipX, zRotation = zRotation }
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayRealEffectAlongCells(string fxKey, string effectRuid, table cells, string direction)
+		-- Renders the real skill clip on every resolved path/area cell (LINE path, ADJACENT area).
+		-- Direction orientation (FlipX / zRotation) applies only to LINE shots; area bursts are radial
+		-- and use no flip. Each cell draws at its own row's OrderInLayer so depth stays consistent.
+		local inst = self:ResolveFxInstigator()
+		local s = self:ResolveImpactEffectScale(fxKey)
+		local scale = Vector3(s, s, 1)
+		local skillData = _SkillDataLogic:GetSkillData(fxKey)
+		local isLine = (skillData ~= nil and skillData.shape == "LINE")
+		local orientation = nil
+		if isLine then
+			orientation = self:ResolveLineOrientation(fxKey, direction)
+		end
+		-- Track the last cell's serial so the summary log carries a serial!=0 render proof for LINE/
+		-- ADJACENT4_SINGLE shapes (PlayEffect returns 0 on nil instigator / dead RUID).
+		local lastSerial = 0
+		for _, pc in ipairs(cells) do
+			local cellPos = _BoardLogic:CellToWorld(pc.col, pc.row)
+			local zRot = 0.0
+			local options = nil
+			if isLine and orientation ~= nil then
+				zRot = orientation.zRotation
+				options = self:BuildBoardFxOptions(pc.row, orientation.flipX, false)
+			else
+				options = self:BuildBoardFxOptions(pc.row, false, false)
+			end
+			lastSerial = _EffectService:PlayEffect(effectRuid, inst, cellPos, zRot, scale, false, options)
+		end
+		log("[CombatFxLogic] real cast effect: " .. fxKey .. " ruid=" .. effectRuid .. " cells=" .. tostring(#cells) .. " serial=" .. tostring(lastSerial) .. " dir=" .. direction)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayCastFx(string fxKey, integer col, integer row, string direction)
+		-- fxKey is a plain string (skillId) — enums/entities must not cross the RPC boundary.
+		-- Particle mapping stays inline: engine enum types are unavailable in user method signatures.
+		-- BasicParticle palette needs no RUID — prototype-first choice (spec jobs-and-combat §8).
+		-- Particles/sound/motion are client-side; skip the server leg of the Multicast entirely.
+		if not isvalid(_UserService.LocalPlayer) then
+			return
+		end
+		local inst = self:ResolveFxInstigator()
+		local pos = _BoardLogic:CellToWorld(col, row)
+		local effectRuid = self:ResolveImpactEffectRuid(fxKey)
+		if effectRuid == "" then
+			-- No real clip mapped: keep the BasicParticle fallback. Burst at the caster cell, then
+			-- trail it across the skill's pattern cells so a line skill reads as a traveling shot
+			-- (and an AOE as a covered area) instead of one dot at the caster cell.
+			local particleType = self:ResolveParticleType(fxKey)
+			_ParticleService:PlayBasicParticle(particleType, inst, pos, 0, Vector3(1, 1, 1), false, nil)
+			local pathCells = _AttackPatternLogic:ResolveSkillCells(fxKey, col, row, direction)
+			for _, pc in ipairs(pathCells) do
+				local cellPos = _BoardLogic:CellToWorld(pc.col, pc.row)
+				_ParticleService:PlayBasicParticle(particleType, inst, cellPos, 0, Vector3(0.8, 0.8, 1), false, nil)
+			end
+		else
+			-- Real clip mapped: render it via exactly one path so a skill never renders zero or double.
+			-- RANGED_TARGET is rendered by PlayImpactFx at each target cell (called from CombatLogic),
+			-- so this method must NOT also render it. Every other shape lands here because PlayImpactFx
+			-- is only invoked for RANGED_TARGET.
+			local skillData = _SkillDataLogic:GetSkillData(fxKey)
+			local shape = skillData ~= nil and skillData.shape or ""
+			if shape == "ADJACENT8" or shape == "ADJACENT4" then
+				-- Caster-cell-centred burst/sweep: one enlarged clip covers the surrounding cells.
+				local options = self:BuildBoardFxOptions(row, false, false)
+				local s = self:ResolveImpactEffectScale(fxKey)
+				local serial = _EffectService:PlayEffect(effectRuid, inst, pos, 0, Vector3(s, s, 1), false, options)
+				log("[CombatFxLogic] real cast effect: " .. fxKey .. " ruid=" .. effectRuid .. " serial=" .. tostring(serial) .. " (caster burst) at (" .. tostring(col) .. "," .. tostring(row) .. ")")
+			elseif shape == "LINE" or shape == "ADJACENT4_SINGLE" then
+				-- Directional path / single-hit cells: render along the resolved cells.
+				local cells = _AttackPatternLogic:ResolveSkillCells(fxKey, col, row, direction)
+				self:PlayRealEffectAlongCells(fxKey, effectRuid, cells, direction)
+			end
+			-- RANGED_TARGET intentionally renders nothing here (PlayImpactFx owns it).
+		end
+		self:PlayAttackMotionAt(col, row)
+		if self.castSoundRuid ~= "" then
+			_SoundService:PlaySoundAtPos(self.castSoundRuid, pos, nil, 1)
+		end
+		log("[CombatFxLogic] cast fx: " .. fxKey .. " at (" .. tostring(col) .. "," .. tostring(row) .. ") dir=" .. direction)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayHitFx(string fxKey, integer col, integer row)
+		-- One burst per damaged cell; kept logless to avoid per-hit log spam.
+		-- Particles/sound are client-side; skip the server leg of the Multicast entirely.
+		if not isvalid(_UserService.LocalPlayer) then
+			return
+		end
+		local pos = _BoardLogic:CellToWorld(col, row)
+		_ParticleService:PlayBasicParticle(BasicParticleType.SparkExplosion, self:ResolveFxInstigator(), pos, 0, Vector3(1, 1, 1), false, nil)
+		if self.hitSoundRuid ~= "" then
+			_SoundService:PlaySoundAtPos(self.hitSoundRuid, pos, nil, 1)
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayDamageSkin(integer col, integer row, integer damage, boolean isCritical)
+		-- DamageSkinService needs an Entity target, so the occupying monster is resolved client-side.
+		local target = self:FindMonsterEntityAt(col, row)
+		if target == nil then
+			return
+		end
+		-- Crits pop larger (spec §E: 1.0 -> 1.3) so they read at a glance; normals stay at base size.
+		local skinScale = Vector2(0, 0)
+		if isCritical then
+			skinScale = Vector2(1.3, 1.3)
+		end
+		_DamageSkinService:Play(target, _CombatConfig.DAMAGE_SKIN_RUID, 0, { damage }, DamageSkinTweenType.Default, isCritical, Vector2(0, 0), skinScale, 1, 1, LitMode.Default)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAttackMotionAt(integer col, integer row)
+		-- The caster is identified by cell, not by Entity, because Multicast params carry coordinates only.
+		-- Companion attack motion is CompanionComponent's responsibility (MASTER_PLAN §2.3).
+		for _, userEntity in ipairs(_UserService.UserEntities.Values) do
+			if isvalid(userEntity) and isvalid(userEntity.TransformComponent) then
+				-- Undo the player foot offset before WorldToCell: the piece is placed at cellCenter + the
+				-- PLAYER_VERTICAL_OFFSET (-0.40 = exactly half a cell), so WorldToCell of the raw position sits
+				-- on the cell boundary and flips to the neighbouring row on float noise (the attack pose then
+				-- matches the wrong cell). Adding the offset back recovers the true cell center.
+				local wp = userEntity.TransformComponent.WorldPosition
+				local cell = _BoardLogic:WorldToCell(Vector3(wp.x, wp.y - _BoardConfig.PLAYER_VERTICAL_OFFSET, 0))
+				if cell ~= nil and cell.col == col and cell.row == row then
+					if isvalid(userEntity.StateComponent) then
+						-- Open risk §10-1: ATTACK state under disabled PlayerController is verified at playtest.
+						userEntity.StateComponent:ChangeState("ATTACK")
+						log("[CombatFxLogic] attack motion played at (" .. tostring(col) .. "," .. tostring(row) .. ")")
+					end
+					break
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity FindMonsterEntityAt(integer col, integer row)
+		-- MonsterLogic's registry is ServerOnly, so clients scan map children for script.MonsterUnit by cell.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			return nil
+		end
+		local map = player.CurrentMap
+		if not isvalid(map) then
+			return nil
+		end
+		local monsterComps = map:GetChildComponentsByTypeName("script.MonsterUnit", true)
+		if monsterComps == nil then
+			return nil
+		end
+		for _, comp in ipairs(monsterComps) do
+			local monsterEntity = comp.Entity
+			if isvalid(monsterEntity) and isvalid(monsterEntity.TransformComponent) then
+				local cell = _BoardLogic:WorldToCell(monsterEntity.TransformComponent.WorldPosition)
+				if cell ~= nil and cell.col == col and cell.row == row then
+					return monsterEntity
+				end
+			end
+		end
+		return nil
+	end
+
+end

@@ -1,0 +1,10 @@
+@Event
+script ChoiceResolvedEvent extends EventType
+
+	property string userId = ""
+
+	property string kind = ""
+
+	property string id = ""
+
+end

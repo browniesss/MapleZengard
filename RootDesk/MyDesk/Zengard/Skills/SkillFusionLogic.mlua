@@ -1,0 +1,162 @@
+@Logic
+script SkillFusionLogic extends Logic
+
+	-- userId → { recipeId → "LOCKED"|"ACTIVATED"|"COMPLETED" } (spec §4.1 state machine)
+	property any recipeState = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Checkpoint for the verify phase.
+		log("[Fusion] OnBeginPlay")
+		if self.recipeState == nil then
+			self.recipeState = {}
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetUserStates(string userId, boolean createIfMissing)
+		-- Per-user recipe state accessor; entries default to LOCKED when absent.
+		if self.recipeState == nil then
+			self.recipeState = {}
+		end
+		local states = self.recipeState[userId]
+		if states == nil and createIfMissing then
+			states = {}
+			self.recipeState[userId] = states
+		end
+		return states
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetActivatedRecipeIds(string userId)
+		-- Returns recipe ids currently in ACTIVATED state, in catalog order (deterministic).
+		local found = {}
+		local states = self:GetUserStates(userId, false)
+		if states == nil then
+			return found
+		end
+		local job = _JobLogic:GetJob(userId)
+		for _, recipe in ipairs(_SkillDataLogic:GetRecipesByJob(job)) do
+			if states[recipe.recipeId] == "ACTIVATED" then
+				table.insert(found, recipe.recipeId)
+			end
+		end
+		return found
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsRecipeSatisfied(string userId, table recipe)
+		-- Symmetric activation rule (R9): one material at max level, the other merely owned.
+		local maxLevel = _SkillDataLogic.SKILL_MAX_LEVEL
+		local lvA = _SkillInventoryLogic:GetSkillLevel(userId, recipe.materialA)
+		local lvB = _SkillInventoryLogic:GetSkillLevel(userId, recipe.materialB)
+		return (lvA == maxLevel and lvB >= 1) or (lvB == maxLevel and lvA >= 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshFusionActivation(string userId)
+		-- Re-judges every recipe of the user's job; called after each inventory mutation (§7.2).
+		local job = _JobLogic:GetJob(userId)
+		if job == nil or job == "" then
+			return
+		end
+		local states = self:GetUserStates(userId, true)
+		for _, recipe in ipairs(_SkillDataLogic:GetRecipesByJob(job)) do
+			local recipeId = recipe.recipeId
+			if states[recipeId] == nil then
+				states[recipeId] = "LOCKED"
+			end
+			if states[recipeId] ~= "COMPLETED" then
+				local satisfied = self:IsRecipeSatisfied(userId, recipe)
+				if satisfied and states[recipeId] == "LOCKED" then
+					states[recipeId] = "ACTIVATED"
+					local ev = FusionActivatedEvent()
+					ev.userId = userId
+					ev.recipeId = recipeId
+					_ZengardGameLogic:SendGameEvent(ev)
+					log("[Fusion] activated: " .. recipeId)
+				elseif not satisfied and states[recipeId] == "ACTIVATED" then
+					-- Defensive demotion (E3): materials were lost after activation.
+					states[recipeId] = "LOCKED"
+					log("[Fusion] deactivated (materials lost): " .. recipeId)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TryCompleteFusion(string userId, string recipeId)
+		-- Completes an ACTIVATED recipe: deletes materials, grants result Lv.1 (R11/R15, D4).
+		local recipe = _SkillDataLogic:GetRecipe(recipeId)
+		if recipe == nil then
+			log_warning("[Fusion] TryCompleteFusion: unknown recipeId " .. tostring(recipeId))
+			return false
+		end
+		local states = self:GetUserStates(userId, true)
+		if states[recipeId] ~= "ACTIVATED" then
+			log("[Fusion] TryCompleteFusion rejected (state=" .. tostring(states[recipeId]) .. "): " .. recipeId)
+			return false
+		end
+		-- Pick-time revalidation (E2): exposure and selection can diverge.
+		if not self:IsRecipeSatisfied(userId, recipe) then
+			states[recipeId] = "LOCKED"
+			log("[Fusion] TryCompleteFusion rejected (condition lost): " .. recipeId)
+			return false
+		end
+
+		-- Capture the earliest material position so the result inherits it (E11).
+		local oldOrder = _SkillInventoryLogic:GetSkillOrder(userId)
+		local inheritPos = nil
+		for i, skillId in ipairs(oldOrder) do
+			if skillId == recipe.materialA or skillId == recipe.materialB then
+				inheritPos = i
+				break
+			end
+		end
+
+		_SkillInventoryLogic:RemoveSkill(userId, recipe.materialA)
+		_SkillInventoryLogic:RemoveSkill(userId, recipe.materialB)
+		_SkillInventoryLogic:GrantSkill(userId, recipe.result)
+
+		if inheritPos ~= nil then
+			-- GrantSkill appended the result at the tail; reinsert it at the inherited slot.
+			local newOrder = _SkillInventoryLogic:GetSkillOrder(userId)
+			self:RemoveFromOrder(newOrder, recipe.result)
+			if inheritPos > #newOrder + 1 then
+				inheritPos = #newOrder + 1
+			end
+			table.insert(newOrder, inheritPos, recipe.result)
+			_SkillInventoryLogic:SetSkillOrder(userId, newOrder)
+		end
+
+		states[recipeId] = "COMPLETED"
+		local ev = SkillFusedEvent()
+		ev.userId = userId
+		ev.recipeId = recipeId
+		ev.resultSkillId = recipe.result
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[Fusion] completed: " .. recipeId .. " → " .. recipe.result)
+		self:RefreshFusionActivation(userId)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RemoveFromOrder(table order, string skillId)
+		-- Removes the first occurrence of skillId from an array-style order list.
+		for i, id in ipairs(order) do
+			if id == skillId then
+				table.remove(order, i)
+				return
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetUser(string userId)
+		-- Run teardown: cascaded from SkillInventoryLogic.ResetUser (§1.1-4).
+		if self.recipeState ~= nil then
+			self.recipeState[userId] = nil
+		end
+	end
+
+end

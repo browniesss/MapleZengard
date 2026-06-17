@@ -1,0 +1,10 @@
+@Event
+script CompanionOrderChangedEvent extends EventType
+
+	property string companionId = ""
+
+	property string direction = ""
+
+	property table skillIds = {}
+
+end

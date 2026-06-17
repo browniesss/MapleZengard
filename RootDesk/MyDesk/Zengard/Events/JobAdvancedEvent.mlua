@@ -1,0 +1,12 @@
+@Event
+script JobAdvancedEvent extends EventType
+
+	property string userId = ""
+
+	property string jobKey = ""
+
+	property integer newTier = 0
+
+	property string branch = ""
+
+end

@@ -1,0 +1,8 @@
+@Event
+script AttackSequenceEndedEvent extends EventType
+
+	property integer zenIndex = 0
+
+	property integer totalKills = 0
+
+end

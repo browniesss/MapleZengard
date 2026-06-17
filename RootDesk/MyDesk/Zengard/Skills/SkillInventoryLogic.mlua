@@ -1,0 +1,235 @@
+@Logic
+script SkillInventoryLogic extends Logic
+
+	-- ownerId(userId|companionId) → { skills = {skillId→level}, ownedOrder = {skillId}, castOrder = {skillId} }
+	property any inv = nil
+
+	property any stageEndHandler = nil
+
+	-- Client-side mirror filled by SyncSkillState (C-28). UISkillHudLogic (Wave 3) consumes it.
+	property any clientSkillState = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Server state init + run-teardown subscription (StageEndedEvent → full reset, R18).
+		log("[SkillInventory] OnBeginPlay")
+		if self.inv == nil then
+			self.inv = {}
+		end
+		self.stageEndHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Release the bus subscription at world session end.
+		if self.stageEndHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndHandler)
+			self.stageEndHandler = nil
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageEnded(any event)
+		-- Roguelike rule: every owner's run state is discarded when the stage ends.
+		log("[SkillInventory] StageEnded → reset all owners (result=" .. tostring(event.result) .. ")")
+		local ownerIds = {}
+		for ownerId, _ in pairs(self:GetInv()) do
+			table.insert(ownerIds, ownerId)
+		end
+		for _, ownerId in ipairs(ownerIds) do
+			self:ResetUser(ownerId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetInv()
+		-- Defensive guard: callers may run before OnBeginPlay ordering settles.
+		if self.inv == nil then
+			self.inv = {}
+		end
+		return self.inv
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetOwnerState(string ownerId, boolean createIfMissing)
+		-- Per-owner state accessor; lazily creates the record for first grant.
+		local pool = self:GetInv()
+		local state = pool[ownerId]
+		if state == nil and createIfMissing then
+			state = { skills = {}, ownedOrder = {}, castOrder = {} }
+			pool[ownerId] = state
+		end
+		return state
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetOwnedSkills(string ownerId)
+		-- Returns {{skillId, level}, ...} in grant order.
+		local state = self:GetOwnerState(ownerId, false)
+		local owned = {}
+		if state == nil then
+			return owned
+		end
+		for _, skillId in ipairs(state.ownedOrder) do
+			table.insert(owned, { skillId = skillId, level = state.skills[skillId] })
+		end
+		return owned
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetSkillLevel(string ownerId, string skillId)
+		-- 0 means not owned.
+		local state = self:GetOwnerState(ownerId, false)
+		if state == nil or state.skills[skillId] == nil then
+			return 0
+		end
+		return state.skills[skillId]
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantSkill(string ownerId, string skillId)
+		-- Grants the skill at Lv.1; actives/fusion results also enter the cast queue (D7).
+		local data = _SkillDataLogic:GetSkillData(skillId)
+		if data == nil then
+			log_warning("[SkillInventory] GrantSkill: unknown skillId " .. tostring(skillId))
+			return
+		end
+		local state = self:GetOwnerState(ownerId, true)
+		if state.skills[skillId] ~= nil then
+			log_warning("[SkillInventory] GrantSkill: already owned " .. skillId .. " (owner=" .. ownerId .. ")")
+			return
+		end
+		state.skills[skillId] = 1
+		table.insert(state.ownedOrder, skillId)
+		if data.kind ~= "PASSIVE" then
+			table.insert(state.castOrder, skillId)
+		end
+		log("[SkillInventory] GrantSkill: " .. ownerId .. " " .. skillId .. " Lv.1")
+		_SkillFusionLogic:RefreshFusionActivation(ownerId)
+		self:PushSkillState(ownerId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean LevelUpSkill(string ownerId, string skillId)
+		-- Returns false when not owned or already at max level (E13 double guard).
+		local state = self:GetOwnerState(ownerId, false)
+		if state == nil or state.skills[skillId] == nil then
+			log_warning("[SkillInventory] LevelUpSkill: not owned " .. tostring(skillId) .. " (owner=" .. ownerId .. ")")
+			return false
+		end
+		if state.skills[skillId] >= _SkillDataLogic.SKILL_MAX_LEVEL then
+			log("[SkillInventory] LevelUpSkill blocked (max level): " .. skillId .. " (owner=" .. ownerId .. ")")
+			return false
+		end
+		state.skills[skillId] = state.skills[skillId] + 1
+		log("[SkillInventory] LevelUpSkill: " .. ownerId .. " " .. skillId .. " Lv." .. tostring(state.skills[skillId]))
+		_SkillFusionLogic:RefreshFusionActivation(ownerId)
+		self:PushSkillState(ownerId)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RemoveSkill(string ownerId, string skillId)
+		-- Fusion-material deletion path (R15); also drops the id from both order lists.
+		local state = self:GetOwnerState(ownerId, false)
+		if state == nil or state.skills[skillId] == nil then
+			log_warning("[SkillInventory] RemoveSkill: not owned " .. tostring(skillId) .. " (owner=" .. ownerId .. ")")
+			return
+		end
+		state.skills[skillId] = nil
+		self:RemoveFromList(state.ownedOrder, skillId)
+		self:RemoveFromList(state.castOrder, skillId)
+		log("[SkillInventory] RemoveSkill: " .. ownerId .. " " .. skillId)
+		_SkillFusionLogic:RefreshFusionActivation(ownerId)
+		self:PushSkillState(ownerId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RemoveFromList(table list, string skillId)
+		-- Removes the first occurrence of skillId from an array-style list.
+		for i, id in ipairs(list) do
+			if id == skillId then
+				table.remove(list, i)
+				return
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetSkillOrder(string ownerId)
+		-- Returns a copy of the cast cycle queue (actives only, D7).
+		local state = self:GetOwnerState(ownerId, false)
+		local order = {}
+		if state == nil then
+			return order
+		end
+		for i, skillId in ipairs(state.castOrder) do
+			order[i] = skillId
+		end
+		return order
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetSkillOrder(string ownerId, table ids)
+		-- Rebuilds the cast queue; unknown/passive ids are dropped, missing owned actives appended.
+		local state = self:GetOwnerState(ownerId, false)
+		if state == nil then
+			log_warning("[SkillInventory] SetSkillOrder: no state for owner " .. ownerId)
+			return
+		end
+		local newOrder = {}
+		local placed = {}
+		for _, skillId in ipairs(ids) do
+			local data = _SkillDataLogic:GetSkillData(skillId)
+			if state.skills[skillId] ~= nil and data ~= nil and data.kind ~= "PASSIVE" and placed[skillId] == nil then
+				table.insert(newOrder, skillId)
+				placed[skillId] = true
+			end
+		end
+		-- Keep every owned active castable even if the caller omitted some (E12 mitigation).
+		for _, skillId in ipairs(state.castOrder) do
+			if placed[skillId] == nil then
+				table.insert(newOrder, skillId)
+				placed[skillId] = true
+			end
+		end
+		state.castOrder = newOrder
+		log("[SkillInventory] SetSkillOrder: " .. ownerId .. " (" .. tostring(#newOrder) .. " skills)")
+		self:PushSkillState(ownerId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetUser(string ownerId)
+		-- Discards the owner's run state and cascades to fusion/choice (§1.1-4).
+		self:GetInv()[ownerId] = nil
+		_SkillFusionLogic:ResetUser(ownerId)
+		_SkillChoiceLogic:ResetUser(ownerId)
+		log("[SkillInventory] ResetUser: " .. ownerId)
+		self:PushSkillState(ownerId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushSkillState(string ownerId)
+		-- HUD push (C-28). Companions have no client session, so only real users receive it.
+		local userEntity = _UserService:GetUserEntityByUserId(ownerId)
+		if not isvalid(userEntity) then
+			return
+		end
+		local payload = { ownerId = ownerId, skills = self:GetOwnedSkills(ownerId), order = self:GetSkillOrder(ownerId), activatedRecipes = _SkillFusionLogic:GetActivatedRecipeIds(ownerId) }
+		self:SyncSkillState(payload, ownerId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSyncSkillState()
+		-- Client-initiated one-shot resync to cover the HUD OnBeginPlay race (MASTER_PLAN §10-5).
+		self:PushSkillState(senderUserId)
+	end
+
+	@ExecSpace("Client")
+	method void SyncSkillState(table serialized)
+		-- Stores the latest snapshot client-side; UISkillHudLogic (Wave 3) reads clientSkillState.
+		self.clientSkillState = serialized
+		log("[SkillInventory] SyncSkillState received: " .. tostring(serialized.ownerId) .. " (" .. tostring(#serialized.skills) .. " skills)")
+	end
+
+end

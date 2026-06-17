@@ -1,0 +1,7 @@
+@Event
+script FusionActivatedEvent extends EventType
+
+	property string userId = ""
+	property string recipeId = ""
+
+end

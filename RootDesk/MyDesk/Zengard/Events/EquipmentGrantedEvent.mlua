@@ -1,0 +1,8 @@
+@Event
+script EquipmentGrantedEvent extends EventType
+
+	property string userId = ""
+
+	property string equipId = ""
+
+end

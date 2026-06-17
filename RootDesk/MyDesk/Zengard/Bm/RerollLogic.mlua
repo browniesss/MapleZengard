@@ -1,0 +1,85 @@
+@Logic
+script RerollLogic extends Logic
+
+	-- userId → remaining rerolls for the active run (never persisted)
+	property any runState = nil
+
+	property any stageEndedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Run-scoped counter only; StageEndedEvent wipes it (§3 consumers).
+		if self.runState == nil then self.runState = {} end
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.HandleStageEnded)
+		log("[RerollLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Releases the bus subscription taken in OnBeginPlay.
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+			self.stageEndedHandler = nil
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void HandleStageEnded(any event)
+		-- Param typed 'any': StageEndedEvent lands in the same wave (W1-core-state),
+		-- so a typed signature would break this file's standalone lint. Payload is unused here.
+		-- Run state is discarded on stage end; the next StartStage calls ResetRun (E13).
+		self.runState = {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetRemainingRerolls(string userId)
+		-- 0 when no active run (counter is granted by ResetRun on stage start).
+		if self.runState == nil then return 0 end
+		return self.runState[userId] or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetRun(string userId)
+		-- StartStage step 6: restores the per-stage cap (placement+choice combined, C-23).
+		if self.runState == nil then self.runState = {} end
+		self.runState[userId] = _BmBalance.REROLL_PER_STAGE_LIMIT
+		_PlayerDataLogic:QueuePush(userId)
+		log("[RerollLogic] reroll reset: userId=" .. userId .. " remaining=" .. tostring(_BmBalance.REROLL_PER_STAGE_LIMIT))
+	end
+
+	@ExecSpace("Server")
+	method void RequestReroll(string kind)
+		-- kind: "placement"|"choice" (§4.8). Validates, decrements, then delegates the re-randomization (C-23).
+		local userId = senderUserId
+		if kind ~= "placement" and kind ~= "choice" then
+			log_warning("[RerollLogic] invalid reroll kind: " .. tostring(kind))
+			return
+		end
+		local remaining = self:GetRemainingRerolls(userId)
+		if remaining <= 0 then
+			-- Server-side double guard; the client button is already disabled (E11).
+			log("[RerollLogic] reroll denied: limit exhausted, userId=" .. userId)
+			return
+		end
+		if kind == "choice" and not _GrowthLogic:HasOpenChoice(userId) then
+			-- No deduction when no choice set is open (spec §7.4 guard).
+			log("[RerollLogic] reroll denied: no open choice, userId=" .. userId)
+			return
+		end
+		remaining -= 1
+		self.runState[userId] = remaining
+		local rerollEvent = RerollUsedEvent()
+		rerollEvent.userId = userId
+		rerollEvent.kind = kind
+		rerollEvent.remaining = remaining
+		_ZengardGameLogic:SendGameEvent(rerollEvent)
+		log("[RerollLogic] RerollUsedEvent kind=" .. kind .. " remaining=" .. tostring(remaining) .. " userId=" .. userId)
+		if kind == "placement" then
+			_WaveLogic:ReshufflePlacement()
+		else
+			_GrowthLogic:RerollCurrentChoices(userId)
+		end
+		_PlayerDataLogic:QueuePush(userId)
+	end
+
+end

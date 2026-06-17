@@ -1,0 +1,203 @@
+@Logic
+script LootLogic extends Logic
+
+	-- Run-scoped loot wallet + drop rolls (MASTER_PLAN §2.1 / §4.8, spec #6 R5~R8).
+	-- Loot, choice-expansion state are per-run only and are never persisted (R2/E8).
+
+	property any monsterKilledHandler = nil
+
+	property any bossKilledHandler = nil
+
+	property any stageEndedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Wires the game event bus (subscriptions via _ZengardGameLogic, MASTER_PLAN §3).
+		self:EnsureState()
+		self.monsterKilledHandler = _ZengardGameLogic:ConnectEvent(MonsterKilledEvent, self.OnMonsterKilled)
+		self.bossKilledHandler = _ZengardGameLogic:ConnectEvent(BossKilledEvent, self.OnBossKilled)
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+		log("[LootLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Releases every handler wired in OnBeginPlay.
+		if self.monsterKilledHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(MonsterKilledEvent, self.monsterKilledHandler)
+		end
+		if self.bossKilledHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(BossKilledEvent, self.bossKilledHandler)
+		end
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnsureState()
+		-- Lazy init keeps ServerOnly APIs safe even when called before this Logic's OnBeginPlay.
+		if self._T.lootCount == nil then
+			self._T.lootCount = {}
+		end
+		if self._T.expanded == nil then
+			self._T.expanded = {}
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(MonsterKilledEvent event)
+		-- §1.3 — normal kills roll loot (0.20 + lootDropAdd) and meso (0.30) here;
+		-- pre-rolled currency from MonsterLogic arrives in the drops payload.
+		self:EnsureState()
+		self:ApplyCurrencyDrops(event.attackerUserId, event.drops)
+		if event.isBoss then
+			return
+		end
+		local userId = event.attackerUserId
+		local equipMul = _EquipmentLogic:GetEquipStatMultipliers(userId)
+		local growthMul = _MetaGrowthLogic:GetGrowthMultipliers(userId)
+		local lootChance = _EquipmentBalance.LOOT_DROP_CHANCE_NORMAL + equipMul.lootDropAdd + growthMul.lootDropAdd
+		if _UtilLogic:RandomDouble() < lootChance then
+			self:AddLoot(userId, 1, "drop")
+		end
+		if _UtilLogic:RandomDouble() < _BmBalance.MESO_DROP_CHANCE_NORMAL then
+			local amount = _UtilLogic:RandomIntegerRange(_BmBalance.MESO_DROP_MIN, _BmBalance.MESO_DROP_MAX)
+			_PlayerDataLogic:AddCurrency(userId, "meso", amount)
+			log("[LootLogic] meso dropped: user=" .. userId .. " +" .. tostring(amount))
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossKilled(BossKilledEvent event)
+		-- C-32 — boss currency (meso 100 / red meso 1) is rolled by MonsterLogic and
+		-- delivered via drops; the fixed loot bundle is this system's constant.
+		self:EnsureState()
+		self:ApplyCurrencyDrops(event.attackerUserId, event.drops)
+		self:AddLoot(event.attackerUserId, _EquipmentBalance.LOOT_DROP_COUNT_BOSS, "boss_drop")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyCurrencyDrops(string userId, table drops)
+		-- drops is a record list ({itemId, count}) produced by MonsterLogic.RollDrops;
+		-- only meso/redMeso records are credited here. Loot is always granted by this Logic
+		-- (avoids double counting with LOOT_DROP_COUNT_BOSS). Other flavor keys are ignored.
+		if drops == nil then
+			return
+		end
+		for _, d in ipairs(drops) do
+			if d.itemId == "meso" and d.count ~= nil and d.count > 0 then
+				_PlayerDataLogic:AddCurrency(userId, "meso", d.count)
+				log("[LootLogic] meso dropped: user=" .. userId .. " +" .. tostring(d.count))
+			elseif d.itemId == "redMeso" and d.count ~= nil and d.count > 0 then
+				_PlayerDataLogic:AddCurrency(userId, "redMeso", d.count)
+				log("[LootLogic] red meso dropped: user=" .. userId .. " +" .. tostring(d.count))
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageEnded(any event)
+		-- Param typed 'any': a typed user-event signature compiles only after the
+		-- event codeblock is registered; 'any' keeps this file build-order independent.
+		-- R2 — every run-scoped state dies with the stage; next StartStage calls ResetRun.
+		self._T.lootCount = {}
+		self._T.expanded = {}
+		log("[LootLogic] run state cleared (stage ended: " .. event.result .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddLoot(string userId, integer amount, string reason)
+		-- Adds loot and broadcasts the new balance (LootChangedEvent, MASTER_PLAN §3).
+		self:EnsureState()
+		local total = self:GetLootCount(userId) + amount
+		self._T.lootCount[userId] = total
+		self:EmitLootChanged(userId, total, amount, reason)
+		log("[LootLogic] loot gained: user=" .. userId .. " +" .. tostring(amount) .. " total=" .. tostring(total) .. " reason=" .. reason)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetLootCount(string userId)
+		-- Current run-scoped loot balance.
+		self:EnsureState()
+		local count = self._T.lootCount[userId]
+		if count == nil then
+			return 0
+		end
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TrySpendLoot(string userId, integer amount, string reason)
+		-- Validate-then-deduct in one server call; no wait() in between so the check
+		-- stays atomic on the single-threaded server (spec E2/E15).
+		self:EnsureState()
+		if amount <= 0 then
+			return false
+		end
+		local current = self:GetLootCount(userId)
+		if current < amount then
+			log("[LootLogic] loot spend denied: user=" .. userId .. " need=" .. tostring(amount) .. " have=" .. tostring(current) .. " reason=" .. reason)
+			return false
+		end
+		local total = current - amount
+		self._T.lootCount[userId] = total
+		self:EmitLootChanged(userId, total, -amount, reason)
+		log("[LootLogic] loot spent: user=" .. userId .. " -" .. tostring(amount) .. " total=" .. tostring(total) .. " reason=" .. reason)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsChoiceExpanded(string userId)
+		-- True once the user expanded the choice set from 3 to 5 this run (R7).
+		self:EnsureState()
+		return self._T.expanded[userId] == true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetRun(string userId)
+		-- Called by ZengardGameLogic.StartStage step 6 (§1.1) for a fresh run.
+		self:EnsureState()
+		local hadLoot = self:GetLootCount(userId)
+		self._T.lootCount[userId] = 0
+		self._T.expanded[userId] = false
+		if hadLoot ~= 0 then
+			self:EmitLootChanged(userId, 0, -hadLoot, "reset")
+		end
+		log("[LootLogic] run reset: user=" .. userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestExpandChoice()
+		-- Spec §7.5 — server-side double guard; the client button disable is advisory only.
+		self:EnsureState()
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			-- No verified RPC sender (e.g. unauthenticated call); ignore instead of indexing nil.
+			return
+		end
+		if self:IsChoiceExpanded(userId) then
+			return
+		end
+		if not self:TrySpendLoot(userId, _GrowthConfig.CHOICE_EXPAND_LOOT_COST, "choice_expand") then
+			return
+		end
+		self._T.expanded[userId] = true
+		local ev = ChoiceExpandedEvent()
+		ev.userId = userId
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[LootLogic] choice expanded: user=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EmitLootChanged(string userId, integer amount, integer delta, string reason)
+		-- Publishes through the single event bus (MASTER_PLAN §3).
+		local ev = LootChangedEvent()
+		ev.userId = userId
+		ev.amount = amount
+		ev.delta = delta
+		ev.reason = reason
+		_ZengardGameLogic:SendGameEvent(ev)
+	end
+
+end

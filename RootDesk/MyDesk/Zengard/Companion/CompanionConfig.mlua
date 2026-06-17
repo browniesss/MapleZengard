@@ -1,0 +1,108 @@
+@Logic
+script CompanionConfig extends Logic
+
+	property integer MAX_COMPANIONS = 2
+
+	property integer JOB_GROUP_CARD_COUNT = 3
+
+	property string DEFAULT_DIRECTION = "RANDOM"
+
+	property string COMPANION_MODEL_ID = "companion"
+
+	-- Holding cell for join/reposition when the board is full (spec E1) — far below the camera frame.
+	property Vector3 OFFBOARD_POSITION = Vector3(0.0, -10.0, 0.0)
+
+	method table GetJobGroups()
+		-- Job-group draw pool for the join choice cards (D3). Fresh table per call: no shared mutable state.
+		return { "WARRIOR", "MAGICIAN", "ARCHER", "THIEF" }
+	end
+
+	method table GetSecondJobPool(string jobGroup)
+		-- §7.6 SECOND_JOB_POOL — uniform draw, warrior trio is verbatim from the design doc p.15.
+		local pools = {
+			WARRIOR = { "PAGE", "FIGHTER", "SPEARMAN" },
+			MAGICIAN = { "FP_WIZARD", "IL_WIZARD", "CLERIC" },
+			ARCHER = { "HUNTER", "CROSSBOWMAN" },
+			THIEF = { "ASSASSIN", "BANDIT" },
+		}
+		return pools[jobGroup]
+	end
+
+	method table GetInitialSkillPool(string secondJob)
+		-- §7.6 initial skill rule (D6): the second job's base-class tier-1 actives, uniform draw.
+		-- skillId vocabulary is owned by SkillDataLogic (§7.4) — listed here as draw mapping only.
+		local warriorSkills = { "warrior_power_strike", "warrior_slash_blast" }
+		local archerSkills = { "archer_arrow_blow", "archer_double_shot" }
+		local mageSkills = { "mage_energy_bolt", "mage_magic_claw" }
+		local thiefSkills = { "thief_double_stab", "thief_lucky_seven" }
+		local pools = {
+			PAGE = warriorSkills,
+			FIGHTER = warriorSkills,
+			SPEARMAN = warriorSkills,
+			HUNTER = archerSkills,
+			CROSSBOWMAN = archerSkills,
+			FP_WIZARD = mageSkills,
+			IL_WIZARD = mageSkills,
+			CLERIC = mageSkills,
+			ASSASSIN = thiefSkills,
+			BANDIT = thiefSkills,
+		}
+		return pools[secondJob]
+	end
+
+	method string GetJobGroupDisplayName(string jobGroup)
+		-- Korean display name for choice cards and panels.
+		local names = {
+			WARRIOR = "전사",
+			MAGICIAN = "마법사",
+			ARCHER = "궁수",
+			THIEF = "도적",
+		}
+		return names[jobGroup] or jobGroup
+	end
+
+	method string GetSecondJobDisplayName(string secondJob)
+		-- Korean display name for the joined companion (classic 2nd-job titles).
+		local names = {
+			PAGE = "페이지",
+			FIGHTER = "파이터",
+			SPEARMAN = "스피어맨",
+			HUNTER = "헌터",
+			CROSSBOWMAN = "사수",
+			FP_WIZARD = "위자드(불,독)",
+			IL_WIZARD = "위자드(썬,콜)",
+			CLERIC = "클레릭",
+			ASSASSIN = "어쌔신",
+			BANDIT = "시프",
+		}
+		return names[secondJob] or secondJob
+	end
+
+	method table GetStageTrigger(string stageId)
+		-- §7.6 trigger defaults (D9): one trigger type per stage; stageId vocabulary is §7.1 ("1-1"~"1-6").
+		local triggers = {
+			["1-3"] = { triggerType = "AFTER_JOB_ADV", noticeText = "이 스테이지에서는 전직 후 동료가 합류합니다." },
+			["1-6"] = { triggerType = "BEFORE_NAMED_BOSS", noticeText = "네임드 보스 전, 동료가 합류합니다." },
+		}
+		return triggers[stageId]
+	end
+
+	method table GetWeaponEquip(string secondJob)
+		-- Costume weapon per second job (D2): equipping the weapon RUID alone resolves the attack motion.
+		-- RUID via msw-search avataritem; empty ruid → CompanionComponent E10 fallback (default avatar).
+		local equips = {
+			PAGE = { slot = "ONE_HANDED", ruid = "9edfb2ac8d4948ae9d6d789c99e0b966" },
+			FIGHTER = { slot = "TWO_HANDED", ruid = "88e6d4f9c00b407fa2be9d6aaafab276" },
+			SPEARMAN = { slot = "TWO_HANDED", ruid = "6793fd362572482f8adc6494f0f0cf60" },
+			HUNTER = { slot = "TWO_HANDED", ruid = "67ce4147813d49f5975917ee86777950" },
+			CROSSBOWMAN = { slot = "TWO_HANDED", ruid = "8601845b98014cec9b336041be103015" },
+			FP_WIZARD = { slot = "ONE_HANDED", ruid = "48297dc75a6949eab31288dd9162a751" },
+			IL_WIZARD = { slot = "ONE_HANDED", ruid = "989be911209545fdacf84f92874cb338" },
+			CLERIC = { slot = "ONE_HANDED", ruid = "061712eadf7d4357a6c306dfd5368860" },
+			ASSASSIN = { slot = "ONE_HANDED", ruid = "c80eb7c8ad1f45988e6d74b1c95a0b13" },
+			BANDIT = { slot = "ONE_HANDED", ruid = "e7b009cc5c22413db76cdf0659de708a" },
+		}
+		return equips[secondJob]
+	end
+
+end

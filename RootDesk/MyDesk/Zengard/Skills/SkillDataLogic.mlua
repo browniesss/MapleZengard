@@ -1,0 +1,270 @@
+@Logic
+script SkillDataLogic extends Logic
+
+	-- Balance constants (MASTER_PLAN §7.4) — single source, other systems must read these.
+	property integer SKILL_MAX_LEVEL = 3
+	property integer INITIAL_CHOICE_COUNT = 2
+	property number FUSION_CHOICE_CHANCE = 0.30
+	property number BASE_CRIT_CHANCE = 0.10
+	property number CRIT_MULTIPLIER = 2.0
+	property integer MAX_OWNED_SKILLS = 8
+
+	property any skillTable = nil
+	property any recipeTable = nil
+	property any recipeOrder = nil
+	property any initialSkillTable = nil
+
+	method void OnInitialize()
+		-- Build the catalog on both sides so client UI can also query names/icons.
+		self:EnsureLoaded()
+	end
+
+	method void OnBeginPlay()
+		-- OnInitialize ordering across @Logic instances is not guaranteed, so re-assert here;
+		-- the skillTable guard makes EnsureLoaded idempotent.
+		self:EnsureLoaded()
+		log("[SkillDataLogic] OnBeginPlay")
+	end
+
+	method void EnsureLoaded()
+		-- Lazy guard: other Logics' OnBeginPlay may run before this one's OnInitialize.
+		if self.skillTable ~= nil then
+			return
+		end
+
+		local skills = {}
+
+		local function addSkill(rec)
+			-- Defaults keep every record schema-complete so consumers can read any field.
+			if rec.jobTier == nil then rec.jobTier = 1 end
+			if rec.advRoute == nil then rec.advRoute = "" end
+			if rec.element == nil then rec.element = "NONE" end
+			if rec.directional == nil then rec.directional = false end
+			if rec.linePierce == nil then rec.linePierce = false end
+			if rec.passiveType == nil then rec.passiveType = "" end
+			if rec.passiveValuePerLv == nil then rec.passiveValuePerLv = {} end
+			if rec.critChanceBonus == nil then rec.critChanceBonus = 0.0 end
+			if rec.hits == nil then rec.hits = 0 end
+			if rec.range == nil then rec.range = 0 end
+			if rec.damagePerLv == nil then rec.damagePerLv = {} end
+			if rec.desc == nil then rec.desc = "" end
+			-- RUID 필요: icon/effect/sound RUIDs unresolved at authoring time (see worker report).
+			if rec.iconRuid == nil then rec.iconRuid = "" end
+			if rec.effectRuid == nil then rec.effectRuid = "" end
+			if rec.soundRuid == nil then rec.soundRuid = "" end
+			skills[rec.skillId] = rec
+		end
+
+		-- Tier-1 active skills (MASTER_PLAN §7.4, names from the design doc p.12).
+		addSkill({ skillId = "warrior_power_strike", displayName = "파워 스트라이크", job = "warrior", kind = "ACTIVE",
+			shape = "ADJACENT4_SINGLE", range = 1, hits = 1, damagePerLv = { 4, 6, 9 },
+			desc = "인접한 적 하나에게 강력한 단일 타격",
+			iconRuid = "e4acdf27d68549db8858d6082169c70c" })
+		addSkill({ skillId = "warrior_slash_blast", displayName = "슬래시 블러스트", job = "warrior", kind = "ACTIVE",
+			shape = "ADJACENT4", range = 1, hits = 1, damagePerLv = { 2, 3, 5 },
+			desc = "상하좌우 인접한 모든 적을 동시 타격",
+			iconRuid = "1dc02c9673284efb94da9c86e7414eeb" })
+		addSkill({ skillId = "archer_arrow_blow", displayName = "애로우 블로우", job = "archer", kind = "ACTIVE",
+			shape = "LINE", range = 7, hits = 1, damagePerLv = { 2, 3, 5 }, linePierce = true, directional = true,
+			desc = "직선으로 화살을 쏘아 일직선상의 적을 관통",
+			iconRuid = "5237ce33df53452b8ee7671b48081a56" })
+		addSkill({ skillId = "archer_double_shot", displayName = "더블샷", job = "archer", kind = "ACTIVE",
+			shape = "LINE", range = 7, hits = 2, damagePerLv = { 2, 3, 4 }, directional = true,
+			desc = "화살 2발을 직선으로 발사",
+			iconRuid = "494208ccdb684478be9b41cd2f28157f" })
+		addSkill({ skillId = "archer_ice_shot", displayName = "아이스샷", job = "archer", kind = "ACTIVE",
+			shape = "LINE", range = 7, hits = 1, damagePerLv = { 3, 4, 6 }, element = "ICE", directional = true,
+			desc = "얼음 화살을 직선으로 발사 (합성 재료)",
+			iconRuid = "754505598cd0402ebd2ca77c19efd325" })
+		addSkill({ skillId = "mage_energy_bolt", displayName = "에너지 볼트", job = "mage", kind = "ACTIVE",
+			shape = "ADJACENT8", range = 1, hits = 1, damagePerLv = { 2, 3, 4 },
+			desc = "주위 8방향의 모든 적에게 마력 폭발",
+			iconRuid = "1f06d7f1824b4d0d96aebb91e3aa1c83" })
+		addSkill({ skillId = "mage_magic_claw", displayName = "매직 클로", job = "mage", kind = "ACTIVE",
+			shape = "RANGED_TARGET", range = 3, hits = 2, damagePerLv = { 1, 2, 3 },
+			desc = "원거리 대상을 마법으로 2회 연타",
+			iconRuid = "148f8efbefd24019a95861bf6efd87dc" })
+		addSkill({ skillId = "thief_double_stab", displayName = "더블 스텝", job = "thief", kind = "ACTIVE",
+			shape = "RANGED_TARGET", range = 2, hits = 2, damagePerLv = { 2, 3, 4 },
+			desc = "근접 대상을 단검으로 2회 빠르게 찌름",
+			iconRuid = "2e5d538e525a4e98a4287b52c15d594a" })
+		addSkill({ skillId = "thief_lucky_seven", displayName = "럭키 세븐", job = "thief", kind = "ACTIVE",
+			shape = "RANGED_TARGET", range = 5, hits = 2, damagePerLv = { 2, 3, 4 }, critChanceBonus = 0.10,
+			desc = "표창 2개를 던지며 치명타 확률 +10%p",
+			iconRuid = "a49c086a08b14c19bb7b9ae483dff2cc" })
+
+		-- Passive skills (one per job).
+		addSkill({ skillId = "warrior_power_mastery", displayName = "워리어 마스터리", job = "warrior", kind = "PASSIVE",
+			passiveType = "FLAT_DAMAGE", passiveValuePerLv = { 1, 2, 3 },
+			desc = "모든 공격의 고정 데미지를 +1씩 증가",
+			iconRuid = "58fada26d4d8484e8071bc94dced39f8" })
+		addSkill({ skillId = "archer_critical_shot", displayName = "크리티컬 샷", job = "archer", kind = "PASSIVE",
+			passiveType = "CRIT_CHANCE", passiveValuePerLv = { 0.10, 0.20, 0.30 },
+			desc = "치명타 확률을 +10%p씩 증가",
+			iconRuid = "537d2879e8ff4c8ca055c26f94da039f" })
+		addSkill({ skillId = "mage_spell_mastery", displayName = "스펠 마스터리", job = "mage", kind = "PASSIVE",
+			passiveType = "FLAT_DAMAGE", passiveValuePerLv = { 1, 2, 3 },
+			desc = "모든 마법의 고정 데미지를 +1씩 증가",
+			iconRuid = "2aa7ba4a1f394b319c435332548ad100" })
+		addSkill({ skillId = "thief_nimble_body", displayName = "님블 바디", job = "thief", kind = "PASSIVE",
+			passiveType = "EXTRA_ACTION", passiveValuePerLv = { 0.05, 0.10, 0.15 },
+			desc = "시전 후 추가 행동 확률을 +5%p씩 증가",
+			iconRuid = "49c8f279bfa64bf3954037f17da0052d" })
+
+		-- Fusion result skills — granted only through TryCompleteFusion, never as NEW candidates.
+		addSkill({ skillId = "warrior_power_blast", displayName = "파워 블러스트", job = "warrior", kind = "FUSION",
+			shape = "ADJACENT4", range = 1, hits = 1, damagePerLv = { 6, 8, 11 },
+			desc = "인접 4방의 적을 강타하는 합성 광역기",
+			iconRuid = "a1808312650d4ca6ad85720e7cebf2f5" })
+		addSkill({ skillId = "archer_double_ice_shot", displayName = "더블 아이스샷", job = "archer", kind = "FUSION",
+			shape = "LINE", range = 7, hits = 2, damagePerLv = { 4, 5, 7 }, element = "ICE", directional = true,
+			desc = "얼음 화살 2발을 직선으로 발사하는 합성기",
+			iconRuid = "365756368c49445aa8007a10e711d5bf" })
+		addSkill({ skillId = "mage_energy_claw", displayName = "에너지 클로", job = "mage", kind = "FUSION",
+			shape = "ADJACENT8", range = 1, hits = 2, damagePerLv = { 2, 3, 4 },
+			desc = "주위 8방의 적을 2회 강타하는 합성 마법",
+			iconRuid = "74fc225867fb4d70b8d6102a42952d72" })
+		addSkill({ skillId = "thief_triple_seven", displayName = "트리플 세븐", job = "thief", kind = "FUSION",
+			shape = "RANGED_TARGET", range = 5, hits = 3, damagePerLv = { 3, 4, 5 },
+			desc = "표창 3개를 던지는 합성 원거리기",
+			iconRuid = "33feb48a1807454384d50ed838c46f93" })
+
+		-- Mage tier-2 branch skills (C-26) — gated by GrowthLogic jobTier/branch in SkillChoiceLogic.
+		addSkill({ skillId = "mage_fire_arrow", displayName = "파이어 애로우", job = "mage", kind = "ACTIVE",
+			jobTier = 2, advRoute = "firepoison", shape = "LINE", range = 7, hits = 1,
+			damagePerLv = { 4, 6, 8 }, element = "FIRE", linePierce = true, directional = true,
+			desc = "불꽃 화살을 직선으로 쏘아 적을 관통",
+			iconRuid = "9067029b91d74c06b53ee43bc55080e7" })
+		addSkill({ skillId = "mage_thunder_bolt", displayName = "썬더 볼트", job = "mage", kind = "ACTIVE",
+			jobTier = 2, advRoute = "icelightning", shape = "ADJACENT8", range = 1, hits = 1,
+			damagePerLv = { 3, 4, 6 }, element = "LIGHTNING",
+			desc = "주위 8방의 적에게 번개를 내리침",
+			iconRuid = "400a59141c5044bfaa716fbb5bedf85f" })
+		addSkill({ skillId = "mage_bless", displayName = "블레스", job = "mage", kind = "PASSIVE",
+			jobTier = 2, advRoute = "bishop", element = "HOLY",
+			passiveType = "FLAT_DAMAGE", passiveValuePerLv = { 2, 3, 4 },
+			desc = "신성한 축복으로 고정 데미지를 +2씩 증가",
+			iconRuid = "1306d09353bb4fd1b203a0670c6a94e1" })
+
+		-- Mage tier-3/4 branch skills (advancement keeps the same firepoison/icelightning/bishop
+		-- route; each tier surfaces one new active per branch — design doc p.12). Gated by
+		-- GrowthLogic jobTier/branch through SkillChoiceLogic:IsTierEligible (jobTier + advRoute).
+		-- firepoison (불독)
+		addSkill({ skillId = "mage_meteor", displayName = "메테오", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 1,
+			damagePerLv = { 6, 9, 12 }, element = "FIRE",
+			desc = "운석을 떨어뜨려 주위 8방의 적을 불태움",
+			iconRuid = "fe86d80277664393aaca4984b350bc29" })
+		addSkill({ skillId = "mage_poison_mist", displayName = "포이즌 미스트", job = "mage", kind = "ACTIVE",
+			jobTier = 4, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 2,
+			damagePerLv = { 7, 10, 14 }, element = "POISON",
+			desc = "독안개로 주위 8방의 적을 2회 잠식",
+			iconRuid = "78031d46ae3847fbabd0de6ae43011dc" })
+		-- icelightning (썬콜)
+		addSkill({ skillId = "mage_chain_lightning", displayName = "체인 라이트닝", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "icelightning", shape = "LINE", range = 7, hits = 2,
+			damagePerLv = { 5, 7, 10 }, element = "LIGHTNING", linePierce = true, directional = true,
+			desc = "직선으로 번개를 흘려 적을 2회 관통",
+			iconRuid = "7db0e2e559a1442bb297e6980820a0db" })
+		addSkill({ skillId = "mage_blizzard", displayName = "블리자드", job = "mage", kind = "ACTIVE",
+			jobTier = 4, advRoute = "icelightning", shape = "ADJACENT8", range = 1, hits = 2,
+			damagePerLv = { 8, 11, 15 }, element = "ICE",
+			desc = "눈보라로 주위 8방의 적을 2회 얼림",
+			iconRuid = "be84c1f93dd447da885431b27006a35d" })
+		-- bishop (비숍)
+		addSkill({ skillId = "mage_heal", displayName = "힐", job = "mage", kind = "ACTIVE",
+			jobTier = 3, advRoute = "bishop", shape = "RANGED_TARGET", range = 4, hits = 3,
+			damagePerLv = { 4, 6, 8 }, element = "HOLY",
+			desc = "원거리 대상에게 신성한 빛을 3회 시전",
+			iconRuid = "fd7e50112b9740018cbe75da3fe1479f" })
+		addSkill({ skillId = "mage_angel_ray", displayName = "엔젤 레이", job = "mage", kind = "ACTIVE",
+			jobTier = 4, advRoute = "bishop", shape = "RANGED_TARGET", range = 5, hits = 2,
+			damagePerLv = { 9, 13, 17 }, element = "HOLY",
+			desc = "천사의 광선으로 원거리 대상을 2회 강타",
+			iconRuid = "a4e73b5f514647dcbc13d61ca01bdc8b" })
+
+		self.skillTable = skills
+
+		-- Fixed fusion recipes (MASTER_PLAN §7.4 / spec §4.2). Data-driven: add rows only.
+		local recipes = {}
+		local order = {}
+
+		local function addRecipe(rec)
+			recipes[rec.recipeId] = rec
+			table.insert(order, rec.recipeId)
+		end
+
+		addRecipe({ recipeId = "recipe_archer_double_ice", job = "archer",
+			materialA = "archer_double_shot", materialB = "archer_ice_shot", result = "archer_double_ice_shot" })
+		addRecipe({ recipeId = "recipe_warrior_power_blast", job = "warrior",
+			materialA = "warrior_power_strike", materialB = "warrior_slash_blast", result = "warrior_power_blast" })
+		addRecipe({ recipeId = "recipe_mage_energy_claw", job = "mage",
+			materialA = "mage_energy_bolt", materialB = "mage_magic_claw", result = "mage_energy_claw" })
+		addRecipe({ recipeId = "recipe_thief_triple_seven", job = "thief",
+			materialA = "thief_lucky_seven", materialB = "thief_double_stab", result = "thief_triple_seven" })
+
+		self.recipeTable = recipes
+		self.recipeOrder = order
+
+		-- Initial 2-pick pools: attack skills only (R2) — ice_shot is a material, excluded here.
+		self.initialSkillTable = {
+			warrior = { "warrior_power_strike", "warrior_slash_blast" },
+			archer = { "archer_arrow_blow", "archer_double_shot" },
+			mage = { "mage_energy_bolt", "mage_magic_claw" },
+			thief = { "thief_double_stab", "thief_lucky_seven" },
+		}
+	end
+
+	method table GetSkillData(string skillId)
+		-- Returns the full skill record (§3.1 schema) or nil when unknown.
+		self:EnsureLoaded()
+		return self.skillTable[skillId]
+	end
+
+	method table GetJobInitialSkillIds(string jobId)
+		-- Returns the two initial attack skill ids for the job (R1/R2).
+		self:EnsureLoaded()
+		local ids = self.initialSkillTable[jobId]
+		if ids == nil then
+			log_warning("[SkillDataLogic] GetJobInitialSkillIds: unknown jobId " .. tostring(jobId))
+			return {}
+		end
+		local copied = {}
+		for i = 1, self.INITIAL_CHOICE_COUNT do
+			copied[i] = ids[i]
+		end
+		return copied
+	end
+
+	method table GetJobSkillPool(string jobId)
+		-- Acquirable pool for the job (active + material + passive), excluding fusion results.
+		self:EnsureLoaded()
+		local pool = {}
+		for _, rec in pairs(self.skillTable) do
+			if rec.job == jobId and rec.kind ~= "FUSION" then
+				table.insert(pool, rec)
+			end
+		end
+		return pool
+	end
+
+	method table GetRecipe(string recipeId)
+		-- Returns one fusion recipe row or nil.
+		self:EnsureLoaded()
+		return self.recipeTable[recipeId]
+	end
+
+	method table GetRecipesByJob(string jobId)
+		-- Returns the job's fusion recipe rows in declaration order (deterministic iteration).
+		self:EnsureLoaded()
+		local found = {}
+		for _, recipeId in ipairs(self.recipeOrder) do
+			local rec = self.recipeTable[recipeId]
+			if rec.job == jobId then
+				table.insert(found, rec)
+			end
+		end
+		return found
+	end
+
+end

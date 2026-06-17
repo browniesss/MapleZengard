@@ -1,0 +1,761 @@
+@Logic
+script UICombatControlLogic extends Logic
+
+	-- UI entity bindings injected by UIBuilder write(bind) — C-21: no script component inside .ui.
+	property Entity groupRoot = "3a98b61c-56bf-4ee6-a087-329db3841161"
+
+	property Entity modeToggleBtn = "8ff6cfef-5d05-4d37-85d3-5c069383adec"
+
+	property Entity modeAutoBtn = "d852fa73-8dab-4e7c-8c65-0f8c77c02382"
+
+	property Entity dirUpBtn = "ecbdcc3a-5497-45b8-ac1d-e29b13570bc5"
+
+	property Entity dirDownBtn = "23db4848-fb71-4d29-8848-a0f5e4e49c48"
+
+	property Entity dirLeftBtn = "813e2f43-f656-44ff-8217-892a6b245950"
+
+	property Entity dirRightBtn = "a4346e47-8c42-490c-829d-da7cef2b17e1"
+
+	property Entity targetBtn = "d0005b63-598c-4229-b6f7-a9634c7e3f83"
+
+	property Entity targetStateText = "03e4e5b3-05de-447d-ac57-9fc70d79187b"
+
+	property Entity orderTitleText = "66cd85e3-c200-4514-b34b-e3606efbeed9"
+
+	property Entity slot1Btn = "aa478553-5ddf-4e6d-91b2-47f89e4975c6"
+
+	property Entity slot2Btn = "5a3a9c50-01d2-4f45-bdb4-698e60bdcc79"
+
+	property Entity slot3Btn = "bd5d5cf3-fbbc-4ddd-9c6a-01bf68608e55"
+
+	property Entity slot4Btn = "71629f07-6cd6-4240-8277-96f0b0ee40aa"
+
+	property Entity slot5Btn = "7bd2de52-b6ba-468c-9308-a5c57ed874fc"
+
+	property Entity slot6Btn = "b5b95171-25e8-47e6-93b8-2c91855af99d"
+
+	property Entity slot7Btn = "3eae9bec-14f5-448a-94dc-12f028851286"
+
+	property Entity slot8Btn = "40e17d59-d217-4f1c-85e1-890d96dd14d3"
+
+	property string combatMode = ""
+
+	property string combatDirection = ""
+
+	property string targetMonsterId = ""
+
+	property boolean targetPickMode = false
+
+	property string localJobId = ""
+
+	property boolean inStage = false
+
+	property boolean inputLocked = false
+
+	property table castOrderIds = {}
+
+	property table pendingOrderIds = {}
+
+	property string lastOrderSignature = ""
+
+	property table uiHandlers = {}
+
+	property table busHandlers = {}
+
+	property any touchHandler = nil
+
+	property boolean wired = false
+
+	property table wiredBtns = {}
+
+	property integer uiTimerId = 0
+
+	property number uiTickInterval = 0.25
+
+	property any indicatorEntity = nil
+
+	-- ui-sound.md project-default SFX RUIDs.
+	property string clickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property number clickSoundVolume = 1.0
+
+	property number hoverSoundVolume = 0.6
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Controller @Logic lives outside the DefaultShow=false group so its lifecycle always runs (C-21).
+		-- Server-bus subscriptions are safe here; entity wiring is deferred to TryWire (entities under the
+		-- DefaultShow=false group are not instantiated until the group is first Enabled).
+		self.combatMode = _CombatConfig.DEFAULT_COMBAT_MODE
+		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
+		self:SubscribeBus(StageStartedEvent, self.OnStageStarted)
+		self:SubscribeBus(StageEndedEvent, self.OnStageEnded)
+		self:SubscribeBus(JobSelectedEvent, self.OnJobSelected)
+		self:SubscribeBus(AttackSequenceStartedEvent, self.OnAttackSequenceStarted)
+		self:SubscribeBus(AttackSequenceEndedEvent, self.OnAttackSequenceEnded)
+		self.touchHandler = _InputService:ConnectEvent(ScreenTouchEvent, self.OnScreenTouch)
+		self.uiTimerId = _TimerService:SetTimerRepeat(self.TickUi, self.uiTickInterval)
+		log("[UICombatControlLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number dt)
+		-- Deferred wiring: button child entities become valid only after the group is first Enabled.
+		-- RefreshAll hides some buttons (targetBtn/empty slots) in the same frame the group is enabled,
+		-- so each button is wired independently the first frame it is valid (never gate on all-valid).
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+				log("[UICombatControlLogic] wired")
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- Wire each button at most once, gated only on its own validity; returns true once all are done.
+		local done = true
+		done = self:WireOnce("mode", self.modeToggleBtn, function() self:OnModeSelected("MANUAL") end, 0) and done
+		done = self:WireOnce("modeAuto", self.modeAutoBtn, function() self:OnModeSelected("AUTO") end, 0) and done
+		done = self:WireOnce("up", self.dirUpBtn, function() self:OnDirectionClicked("UP") end, 0) and done
+		done = self:WireOnce("down", self.dirDownBtn, function() self:OnDirectionClicked("DOWN") end, 0) and done
+		done = self:WireOnce("left", self.dirLeftBtn, function() self:OnDirectionClicked("LEFT") end, 0) and done
+		done = self:WireOnce("right", self.dirRightBtn, function() self:OnDirectionClicked("RIGHT") end, 0) and done
+		done = self:WireOnce("target", self.targetBtn, function() self:OnTargetClicked() end, 0) and done
+		for i = 1, _SkillDataLogic.MAX_OWNED_SKILLS do
+			local slotIndex = i
+			done = self:WireOnce("slot" .. slotIndex, self:GetSlotEntity(slotIndex),
+				function() self:OnSlotClicked(slotIndex) end, slotIndex) and done
+		end
+		return done
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean WireOnce(string key, Entity btn, any onClick, integer slotIndex)
+		-- Idempotent per-button wiring: connects the first time btn is valid, then reports wired thereafter.
+		-- slotIndex is 0 for non-slot buttons (no skill-range preview) and 1..N for skill slots.
+		if self.wiredBtns[key] then
+			return true
+		end
+		if not isvalid(btn) then
+			return false
+		end
+		self:WireButton(btn, onClick, slotIndex)
+		self.wiredBtns[key] = true
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Everything connected in OnBeginPlay must be released here.
+		for _, rec in ipairs(self.uiHandlers) do
+			if isvalid(rec.entity) then
+				rec.entity:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.uiHandlers = {}
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+		if self.touchHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchEvent, self.touchHandler)
+			self.touchHandler = nil
+		end
+		if self.uiTimerId ~= 0 then
+			_TimerService:ClearTimer(self.uiTimerId)
+			self.uiTimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SubscribeBus(any evType, any callback)
+		-- Tracked so OnEndPlay can release every bus subscription.
+		local h = _ZengardGameLogic:ConnectEvent(evType, callback)
+		table.insert(self.busHandlers, { evType = evType, evHandler = h })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity btn, any onClick, integer slotIndex)
+		-- Click + hover SFX wiring uses the project-default UI RUIDs (ui-sound.md). slotIndex > 0 adds
+		-- press-and-hold skill-range preview on top of the existing tap (cast-order) + hover behavior;
+		-- slotIndex == 0 leaves non-slot buttons unchanged.
+		if not isvalid(btn) then
+			return
+		end
+		local clickH = btn:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSoundRuid, self.clickSoundVolume)
+			onClick()
+		end)
+		table.insert(self.uiHandlers, { entity = btn, evType = ButtonClickEvent, evHandler = clickH })
+		local hoverH = btn:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSoundRuid, self.hoverSoundVolume)
+		end)
+		table.insert(self.uiHandlers, { entity = btn, evType = UITouchEnterEvent, evHandler = hoverH })
+		if slotIndex > 0 then
+			-- Press shows the range preview; release/normal (finger lifted or dragged off) hides it. The
+			-- short tap still fires ButtonClickEvent -> OnSlotClicked, so cast-order picking is unaffected.
+			local capturedIndex = slotIndex
+			local pressH = btn:ConnectEvent(ButtonPressedEvent, function()
+				_SkillRangePreviewLogic:ShowSkillRange(capturedIndex)
+			end)
+			table.insert(self.uiHandlers, { entity = btn, evType = ButtonPressedEvent, evHandler = pressH })
+			local stateH = btn:ConnectEvent(ButtonStateChangeEvent, function(event)
+				if event.state == ButtonState.Released or event.state == ButtonState.Normal then
+					_SkillRangePreviewLogic:HideSkillRange()
+				end
+			end)
+			table.insert(self.uiHandlers, { entity = btn, evType = ButtonStateChangeEvent, evHandler = stateH })
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSlotEntity(integer index)
+		-- Entity properties hold UUID defaults, so the slot list cannot live in one table property.
+		if index == 1 then
+			return self.slot1Btn
+		elseif index == 2 then
+			return self.slot2Btn
+		elseif index == 3 then
+			return self.slot3Btn
+		elseif index == 4 then
+			return self.slot4Btn
+		elseif index == 5 then
+			return self.slot5Btn
+		elseif index == 6 then
+			return self.slot6Btn
+		elseif index == 7 then
+			return self.slot7Btn
+		elseif index == 8 then
+			return self.slot8Btn
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetLocalUserId()
+		-- LocalPlayer can be nil during early client init, so resolve lazily per call.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.PlayerComponent) then
+			return ""
+		end
+		return player.PlayerComponent.UserId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageStarted(StageStartedEvent event)
+		-- Roguelike reset (V20): every per-run combat input returns to balance defaults.
+		self.inStage = true
+		self.combatMode = _CombatConfig.DEFAULT_COMBAT_MODE
+		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
+		self.targetMonsterId = ""
+		self.targetPickMode = false
+		self.castOrderIds = {}
+		self.pendingOrderIds = {}
+		self.lastOrderSignature = ""
+		self:SetInputLocked(false)
+		if isvalid(self.groupRoot) then
+			self.groupRoot.Enable = true
+		end
+		-- Covers the HUD OnBeginPlay race (MASTER_PLAN §10-5); TickUi picks up the reply by signature diff.
+		_SkillInventoryLogic:RequestSyncSkillState()
+		self:RefreshAll()
+		log("[UICombatControlLogic] combat control shown: stage=" .. event.stageId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Hide with the run; UIResultLogic owns the end-of-stage screen.
+		self.inStage = false
+		self.targetPickMode = false
+		if isvalid(self.groupRoot) then
+			self.groupRoot.Enable = false
+		end
+		self:SetIndicatorVisible(false)
+		log("[UICombatControlLogic] combat control hidden: result=" .. event.result)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnJobSelected(JobSelectedEvent event)
+		-- Thief is the only job with manual target pick (D-11).
+		if event.userId ~= self:GetLocalUserId() then
+			return
+		end
+		self.localJobId = event.jobId
+		self:RefreshTargetUi()
+		log("[UICombatControlLogic] job noted: " .. event.jobId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnAttackSequenceStarted(AttackSequenceStartedEvent event)
+		-- Config changes mid-sequence would desync the server snapshot, so input is locked (§3).
+		self:SetInputLocked(true)
+		log("[UICombatControlLogic] input locked: zen=" .. tostring(event.zenIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnAttackSequenceEnded(AttackSequenceEndedEvent event)
+		-- Unlock and re-render: kills during the sequence may have changed the owned-skill mirror.
+		self:SetInputLocked(false)
+		self:RefreshSlots()
+		log("[UICombatControlLogic] input unlocked: zen=" .. tostring(event.zenIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetInputLocked(boolean locked)
+		-- CanvasGroup gate blocks every child button in one write.
+		self.inputLocked = locked
+		if isvalid(self.groupRoot) and isvalid(self.groupRoot.CanvasGroupComponent) then
+			self.groupRoot.CanvasGroupComponent.Interactable = not locked
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnModeSelected(string mode)
+		-- 2-state segment: each segment selects its own mode (no toggle). AUTO randomizes
+		-- direction per cast server-side (R9); selecting AUTO also drops manual target picking.
+		if not self.inStage or self.inputLocked then
+			return
+		end
+		if self.combatMode == mode then
+			return
+		end
+		self.combatMode = mode
+		if mode == "AUTO" then
+			self.targetPickMode = false
+		end
+		self:SendCombatConfig()
+		self:RefreshAll()
+		log("[UICombatControlLogic] mode selected: " .. self.combatMode)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDirectionClicked(string direction)
+		-- Manual-only input (p.8: no direction setting while in auto play).
+		if not self.inStage or self.inputLocked then
+			return
+		end
+		if self.combatMode ~= "MANUAL" then
+			_UIToastLogic:ShowMessage("자동 모드에서는 공격 방향을 지정할 수 없습니다")
+			return
+		end
+		if not self:LoadoutUsesDirection() then
+			-- Only LINE skills (archer arrows) read the direction; mage/thief/warrior loadouts
+			-- auto-target the nearest enemy, so spell out why the pad has no effect for them.
+			_UIToastLogic:ShowMessage("지금 장착한 스킬은 방향과 무관합니다 — 사거리 안의 가장 가까운 적을 자동 공격합니다")
+		end
+		self.combatDirection = direction
+		self:SendCombatConfig()
+		self:RefreshDirections()
+		log("[UICombatControlLogic] direction set: " .. direction)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetCombatDirection()
+		-- Public accessor for SkillRangePreviewLogic: LINE-shape previews track the live pad direction.
+		return self.combatDirection
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean LoadoutUsesDirection()
+		-- The direction pad only matters for LINE-shaped skills (archer arrows fire along it).
+		-- Every other shape (RANGED_TARGET nearest-target, ADJACENT4/4_SINGLE/8 fixed area) ignores it.
+		for _, skillId in ipairs(self.castOrderIds) do
+			local data = _SkillDataLogic:GetSkillData(skillId)
+			if data ~= nil and data.shape == "LINE" then
+				return true
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTargetClicked()
+		-- Enters/cancels world-tap target picking; the button itself is hidden for non-thief jobs.
+		if not self.inStage or self.inputLocked then
+			return
+		end
+		if self.localJobId ~= "thief" then
+			_UIToastLogic:ShowMessage("도적만 타겟을 지정할 수 있습니다")
+			return
+		end
+		if self.combatMode ~= "MANUAL" then
+			_UIToastLogic:ShowMessage("수동 모드에서만 타겟을 지정할 수 있습니다")
+			return
+		end
+		self.targetPickMode = not self.targetPickMode
+		self:RefreshTargetUi()
+		log("[UICombatControlLogic] target pick mode: " .. tostring(self.targetPickMode))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotClicked(integer slotIndex)
+		-- Tap slots in the desired cast sequence; committing sends the whole order at once (C-11).
+		if not self.inStage or self.inputLocked then
+			return
+		end
+		local skillId = self.castOrderIds[slotIndex]
+		if skillId == nil then
+			return
+		end
+		-- Surface what the skill does AND how it targets, so the player understands why a hit
+		-- lands where it does (e.g. magic claw auto-targets the nearest enemy, ignoring the pad).
+		self:ShowSkillInfo(skillId)
+		for _, pendingId in ipairs(self.pendingOrderIds) do
+			if pendingId == skillId then
+				return
+			end
+		end
+		table.insert(self.pendingOrderIds, skillId)
+		if #self.pendingOrderIds >= #self.castOrderIds then
+			self.castOrderIds = self.pendingOrderIds
+			self.pendingOrderIds = {}
+			self:SendCombatConfig()
+			log("[UICombatControlLogic] skill order set: " .. table.concat(self.castOrderIds, ","))
+		end
+		self:RefreshSlots()
+	end
+
+	@ExecSpace("ClientOnly")
+	method string DescribeTargeting(any data)
+		-- Plain-language targeting so the direction pad's relevance (or irrelevance) is obvious.
+		local shape = data.shape
+		if shape == "RANGED_TARGET" then
+			return "사거리 " .. tostring(data.range) .. " 내 가장 가까운 적 자동 타격 (방향 무관)"
+		elseif shape == "LINE" then
+			return "바라보는 방향으로 직선 " .. tostring(data.range) .. "칸 (방향 지정)"
+		elseif shape == "ADJACENT4" then
+			return "상하좌우 인접한 적 전체"
+		elseif shape == "ADJACENT4_SINGLE" then
+			return "인접한 적 1체"
+		elseif shape == "ADJACENT8" then
+			return "주위 8칸의 적 전체"
+		elseif shape == "PASSIVE" then
+			return "패시브 — 항상 자동 적용"
+		end
+		return "특수 타겟"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowSkillInfo(string skillId)
+		-- One toast: name — what it does / how it targets. Read from the shared skill catalog.
+		local data = _SkillDataLogic:GetSkillData(skillId)
+		if data == nil then
+			return
+		end
+		local msg = data.displayName
+		if data.desc ~= nil and data.desc ~= "" then
+			msg = msg .. " — " .. data.desc
+		end
+		msg = msg .. " / " .. self:DescribeTargeting(data)
+		_UIToastLogic:ShowMessage(msg)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScreenTouch(ScreenTouchEvent event)
+		-- World tap -> board cell -> monsterId; only consumed while target picking is armed.
+		if not self.targetPickMode or not self.inStage or self.inputLocked then
+			return
+		end
+		if _InputService:IsPointerOverUI() then
+			return
+		end
+		local worldPos = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local cell = _BoardLogic:WorldToCell(Vector3(worldPos.x, worldPos.y, 0))
+		if cell == nil then
+			_UIToastLogic:ShowMessage("보드 위의 몬스터를 탭해 주세요")
+			return
+		end
+		local monsterId = self:FindMonsterIdAt(cell)
+		if monsterId == "" then
+			_UIToastLogic:ShowMessage("해당 칸에 몬스터가 없습니다")
+			return
+		end
+		self.targetMonsterId = monsterId
+		self.targetPickMode = false
+		self:SendCombatConfig()
+		self:RefreshTargetUi()
+		log("[UICombatControlLogic] target set: " .. monsterId .. " at (" .. cell.col .. "," .. cell.row .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FindMonsterIdAt(table cell)
+		-- MonsterLogic's registry is ServerOnly, so the client derives monsterId from the
+		-- spawn naming contract "<typeId>_mon_<n>" on MonsterUnit entities.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.CurrentMap) then
+			return ""
+		end
+		local units = player.CurrentMap:GetChildComponentsByTypeName("script.MonsterUnit", true)
+		for _, comp in ipairs(units) do
+			---@type MonsterUnit
+			local unit = comp
+			if isvalid(unit) and unit.IsDead ~= true and isvalid(unit.Entity) then
+				local unitCell = _BoardLogic:WorldToCell(unit.Entity.TransformComponent.WorldPosition)
+				if unitCell ~= nil and unitCell.col == cell.col and unitCell.row == cell.row then
+					local monsterId = string.match(unit.Entity.Name, "(mon_%d+)$")
+					if monsterId ~= nil then
+						return monsterId
+					end
+				end
+			end
+		end
+		return ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SendCombatConfig()
+		-- Single server entry for every combat-control input (C-11: all via RequestSetCombatConfig).
+		local userId = self:GetLocalUserId()
+		if userId == "" then
+			return
+		end
+		_CombatLogic:RequestSetCombatConfig(userId, self.combatMode, self.combatDirection, self.castOrderIds, self.targetMonsterId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickUi()
+		-- Low-rate tick: mirrors the skill-state push by signature diff and keeps the world
+		-- direction indicator glued to the (server-repositioned) player piece.
+		if not self.inStage then
+			self:SetIndicatorVisible(false)
+			return
+		end
+		self:SyncSlotsIfChanged()
+		self:UpdateIndicator()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncSlotsIfChanged()
+		-- clientSkillState arrives via server push at arbitrary times; polling the signature
+		-- avoids racing the push against relayed game events.
+		local signature = ""
+		local snap = _SkillInventoryLogic.clientSkillState
+		if snap ~= nil and snap.order ~= nil then
+			signature = table.concat(snap.order, ",")
+		end
+		if signature ~= self.lastOrderSignature then
+			self.lastOrderSignature = signature
+			self.pendingOrderIds = {}
+			self:RefreshSlots()
+			-- Loadout changed → the pad's relevance may have flipped (e.g. gained a LINE skill).
+			self:RefreshDirections()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAll()
+		-- Full repaint after mode/stage transitions.
+		self:RefreshModeUi()
+		self:RefreshDirections()
+		self:RefreshTargetUi()
+		self:RefreshSlots()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshModeUi()
+		-- 2-state segment: selected side is green + white glyph, the other is muted gray.
+		self:PaintModeSegment(self.modeToggleBtn, self.combatMode == "MANUAL")
+		self:PaintModeSegment(self.modeAutoBtn, self.combatMode == "AUTO")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PaintModeSegment(Entity seg, boolean selected)
+		-- One paint rule for both segments so the selected state reads at a glance.
+		if not isvalid(seg) then
+			return
+		end
+		if isvalid(seg.SpriteGUIRendererComponent) then
+			if selected then
+				seg.SpriteGUIRendererComponent.Color = Color(0.45, 0.78, 0.5, 1)
+			else
+				seg.SpriteGUIRendererComponent.Color = Color(0.85, 0.85, 0.88, 1)
+			end
+		end
+		if isvalid(seg.TextComponent) then
+			if selected then
+				seg.TextComponent.FontColor = Color(1, 1, 1, 1)
+			else
+				seg.TextComponent.FontColor = Color(0.82, 0.82, 0.85, 1)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshDirections()
+		-- Selected direction glows green; the whole pad dims in AUTO mode.
+		self:PaintDirection(self.dirUpBtn, "UP")
+		self:PaintDirection(self.dirDownBtn, "DOWN")
+		self:PaintDirection(self.dirLeftBtn, "LEFT")
+		self:PaintDirection(self.dirRightBtn, "RIGHT")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PaintDirection(Entity btn, string direction)
+		-- One paint rule for all four pad buttons.
+		if not isvalid(btn) or not isvalid(btn.SpriteGUIRendererComponent) then
+			return
+		end
+		-- Dim the whole pad when it can't affect anything: AUTO mode, or a loadout with no LINE skill
+		-- (mage/thief/warrior) — a clear visual cue that direction is irrelevant for these skills.
+		if self.combatMode ~= "MANUAL" or not self:LoadoutUsesDirection() then
+			btn.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 0.4)
+		elseif self.combatDirection == direction then
+			btn.SpriteGUIRendererComponent.Color = Color(0.45, 0.78, 0.5, 1)
+		else
+			btn.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTargetUi()
+		-- Target widgets exist only for the thief loadout (D-11).
+		local isThief = (self.localJobId == "thief")
+		if isvalid(self.targetBtn) then
+			self.targetBtn.Enable = isThief
+			if isvalid(self.targetBtn.TextComponent) then
+				if self.targetPickMode then
+					self.targetBtn.TextComponent.Text = "선택 취소"
+				else
+					self.targetBtn.TextComponent.Text = "타겟 지정"
+				end
+			end
+		end
+		if isvalid(self.targetStateText) then
+			self.targetStateText.Enable = isThief
+			if isvalid(self.targetStateText.TextComponent) then
+				if self.targetPickMode then
+					self.targetStateText.TextComponent.Text = "몬스터를 탭하세요"
+				elseif self.targetMonsterId ~= "" then
+					self.targetStateText.TextComponent.Text = "타겟: " .. self.targetMonsterId
+				else
+					self.targetStateText.TextComponent.Text = "타겟: 자동(최근접)"
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSlots()
+		-- Renders the cast order from the client mirror; pending taps show their picked sequence.
+		local snap = _SkillInventoryLogic.clientSkillState
+		local order = {}
+		if snap ~= nil and snap.order ~= nil then
+			for i, skillId in ipairs(snap.order) do
+				order[i] = skillId
+			end
+		end
+		self.castOrderIds = order
+		for i = 1, _SkillDataLogic.MAX_OWNED_SKILLS do
+			local slot = self:GetSlotEntity(i)
+			if isvalid(slot) then
+				local skillId = self.castOrderIds[i]
+				if skillId == nil then
+					slot.Enable = false
+				else
+					slot.Enable = true
+					local data = _SkillDataLogic:GetSkillData(skillId)
+					local skillName = skillId
+					if data ~= nil then
+						skillName = data.displayName
+					end
+					local pendingIndex = 0
+					for p, pendingId in ipairs(self.pendingOrderIds) do
+						if pendingId == skillId then
+							pendingIndex = p
+						end
+					end
+					if isvalid(slot.TextComponent) then
+						if pendingIndex > 0 then
+							slot.TextComponent.Text = "[" .. pendingIndex .. "]\n" .. skillName
+						else
+							slot.TextComponent.Text = i .. ".\n" .. skillName
+						end
+					end
+					if isvalid(slot.SpriteGUIRendererComponent) then
+						if pendingIndex > 0 then
+							slot.SpriteGUIRendererComponent.Color = Color(0.45, 0.78, 0.5, 1)
+						else
+							slot.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+						end
+					end
+				end
+			end
+		end
+		if isvalid(self.orderTitleText) and isvalid(self.orderTitleText.TextComponent) then
+			if #self.pendingOrderIds > 0 then
+				self.orderTitleText.TextComponent.Text = "순서 지정 중... (" .. #self.pendingOrderIds .. "/" .. #self.castOrderIds .. ")"
+			else
+				self.orderTitleText.TextComponent.Text = "스킬 순서 — 슬롯을 탭해 시전 순서 지정"
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateIndicator()
+		-- Direction arrow above the player piece, manual mode only (D-7). Indicator entity is
+		-- optional in the map: a missing entity degrades to the button highlight without error.
+		local indicator = self:FindIndicator()
+		if indicator == nil then
+			return
+		end
+		if self.combatMode ~= "MANUAL" then
+			indicator.Visible = false
+			return
+		end
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			indicator.Visible = false
+			return
+		end
+		local cell = _BoardLogic:WorldToCell(player.TransformComponent.WorldPosition)
+		if cell == nil then
+			indicator.Visible = false
+			return
+		end
+		local center = _BoardLogic:CellToWorld(cell.col, cell.row)
+		-- Slightly under one cell above the piece so the arrow never covers the avatar.
+		local offsetY = _BoardConfig.CELL_SIZE * 0.7
+		indicator.TransformComponent.WorldPosition = Vector3(center.x, center.y + offsetY, center.z)
+		indicator.TransformComponent.ZRotation = self:DirectionToAngle(self.combatDirection)
+		indicator.Visible = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method number DirectionToAngle(string direction)
+		-- Indicator sprite is authored pointing up; Z rotates counterclockwise.
+		if direction == "LEFT" then
+			return 90
+		elseif direction == "DOWN" then
+			return 180
+		elseif direction == "RIGHT" then
+			return 270
+		end
+		return 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity FindIndicator()
+		-- Cached after first hit; re-searched while nil because spawn timing is orchestrated elsewhere.
+		if isvalid(self.indicatorEntity) then
+			return self.indicatorEntity
+		end
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.CurrentMap) then
+			return nil
+		end
+		self.indicatorEntity = player.CurrentMap:GetChildByName("DirectionIndicator", true)
+		return self.indicatorEntity
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetIndicatorVisible(boolean visible)
+		-- Used on hide paths where the full UpdateIndicator pass is unnecessary.
+		if isvalid(self.indicatorEntity) then
+			self.indicatorEntity.Visible = visible
+		end
+	end
+
+end

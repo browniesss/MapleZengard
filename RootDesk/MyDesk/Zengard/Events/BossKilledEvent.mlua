@@ -1,0 +1,10 @@
+@Event
+script BossKilledEvent extends EventType
+
+	property string monsterId = ""
+
+	property string attackerUserId = ""
+
+	property table drops = {}
+
+end

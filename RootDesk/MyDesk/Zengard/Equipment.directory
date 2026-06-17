@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://8905695cb7c44968b495619d37cb7fed",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://8905695cb7c44968b495619d37cb7fed",
+      "name": "Equipment",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}

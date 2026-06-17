@@ -1,0 +1,197 @@
+@Logic
+script UIJobAdvancePopupLogic extends Logic
+
+	property Entity popupRoot = "585a8328-ec5e-4aa7-a829-a5d5c4cc77c6"
+
+	property TextComponent titleText = "0a13d99e-0bd4-4126-af08-2befcfdf1807"
+
+	property TextComponent jobNameText = "34fc149a-0344-4845-b587-c76047a61dd4"
+
+	property TextComponent descText = "5dd27e2a-aaa9-4dbc-9522-91de11e84043"
+
+	property Entity btnConfirm = "86ee3c2a-a3f5-440a-8e98-19697f6d68bd"
+
+	-- ui-sound.md default UI SFX RUIDs (§5.2 binding contract).
+	property string clickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property number sfxVolume = 0.8
+
+	property boolean isOpen = false
+
+	property boolean wired = false
+
+	property any inputHandlers = nil
+
+	property any busHandlers = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Server-bus subscriptions are safe at OnBeginPlay; the confirm button lives inside the
+		-- DefaultShow=false group so its wiring is deferred to TryWire (children exist only after Enable=true).
+		log("[UIJobAdvancePopupLogic] OnBeginPlay")
+		self.inputHandlers = {}
+		self.busHandlers = {}
+		self:Subscribe(JobAdvancedEvent, self.OnJobAdvanced)
+		self:Subscribe(StageEndedEvent, self.OnStageEnded)
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number dt)
+		-- Retry wiring each frame until the popup group has been enabled once and its children exist.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- Wires the confirm button once it is valid (false → retry next frame).
+		if not isvalid(self.btnConfirm) then
+			return false
+		end
+		self:WireButton(self.btnConfirm, function() self:ClosePopup() end)
+		log("[UIJobAdvancePopupLogic] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Mandatory release of every handler connected in OnBeginPlay.
+		if self.inputHandlers ~= nil then
+			for _, rec in ipairs(self.inputHandlers) do
+				if isvalid(rec.target) then
+					rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+				end
+			end
+			self.inputHandlers = nil
+		end
+		if self.busHandlers ~= nil then
+			for _, rec in ipairs(self.busHandlers) do
+				_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+			self.busHandlers = nil
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowJobAdvance(table jobInfo)
+		-- §4.9 client API: jobInfo carries {jobKey, newTier, branch} (+optional jobName/desc overrides).
+		local tier = jobInfo.newTier or 2
+		local jobKey = jobInfo.jobKey or ""
+		local branch = jobInfo.branch or ""
+		local jobName = jobInfo.jobName or self:GetJobDisplayName(jobKey, tier, branch)
+		if isvalid(self.titleText) then
+			self.titleText.Text = tier .. "차 전직!"
+		end
+		if isvalid(self.jobNameText) then
+			self.jobNameText.Text = jobName
+		end
+		if isvalid(self.descText) then
+			self.descText.Text = jobInfo.desc or (jobName .. "(으)로 전직했습니다. 새로운 힘이 깨어납니다!")
+		end
+		-- Occlusion is reference-counted by the router; only increment on the closed->open transition so
+		-- a re-fired JobAdvancedEvent over an open celebration can't leave a depth the single Close never repays.
+		local wasOpen = self.isOpen
+		self.isOpen = true
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = true
+		end
+		if not wasOpen then
+			_UIRouterLogic:ApplyModalHudOcclusion(true)
+		end
+		log("[UIJobAdvancePopupLogic] show job advance: tier=" .. tier .. " job=" .. jobName)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClosePopup()
+		if not self.isOpen then
+			return
+		end
+		self.isOpen = false
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = false
+		end
+		_UIRouterLogic:ApplyModalHudOcclusion(false)
+		log("[UIJobAdvancePopupLogic] job advance popup closed")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnJobAdvanced(JobAdvancedEvent event)
+		-- §3 receiver: only the advancing user's client opens the celebration shell.
+		if not self:IsLocalUser(event.userId) then
+			return
+		end
+		self:ShowJobAdvance({ jobKey = event.jobKey, newTier = event.newTier, branch = event.branch })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Spec E3: the Result flow discards any open modal.
+		self:ClosePopup()
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetJobDisplayName(string jobKey, integer tier, string branch)
+		-- Display-only route names (§7.5 [P]/[D]); authoritative route data stays inside #4 GrowthConfig.
+		if jobKey == "mage" then
+			if tier <= 1 or branch == "" then
+				return "마법사"
+			end
+			local branchNames = { firepoison = "불독 마법사", icelightning = "썬콜 마법사", bishop = "비숍" }
+			return branchNames[branch] or "마법사"
+		end
+		local routes = {
+			warrior = { "검사", "파이터", "크루세이더", "히어로" },
+			archer = { "아처", "사수", "저격수", "신궁" },
+			thief = { "로그", "어쌔신", "허밋", "나이트로드" },
+		}
+		local route = routes[jobKey]
+		if route == nil then
+			return jobKey
+		end
+		local tierIndex = math.min(math.max(tier, 1), #route)
+		return route[tierIndex]
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsLocalUser(string userId)
+		-- Events are relayed to every client; only the owning client reacts.
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) then
+			return false
+		end
+		return localPlayer.PlayerComponent.UserId == userId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity buttonEntity, any onClick)
+		-- Click + hover SFX wiring (ui-sound.md defaults); handlers tracked for OnEndPlay release.
+		if not isvalid(buttonEntity) then
+			log_warning("[UIJobAdvancePopupLogic] button entity not bound")
+			return
+		end
+		local clickHandler = buttonEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSoundRuid, self.sfxVolume)
+			onClick()
+		end)
+		table.insert(self.inputHandlers, { target = buttonEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = buttonEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSoundRuid, self.sfxVolume)
+		end)
+		table.insert(self.inputHandlers, { target = buttonEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(any eventType, any eventHandler)
+		-- All game events arrive through the ZengardGameLogic client-side bus (§3).
+		table.insert(self.busHandlers, { evType = eventType, evHandler = _ZengardGameLogic:ConnectEvent(eventType, eventHandler) })
+	end
+
+end

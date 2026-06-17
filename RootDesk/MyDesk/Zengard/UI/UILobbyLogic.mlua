@@ -1,0 +1,406 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UILobbyLogic extends Logic
+
+	property Entity btnStory = "9a0f5c0e-7769-4f9f-b153-161cceafa960"
+
+	property Entity btnChallenge = "8b8c74fa-ae08-4ec1-90d2-e74af7d9be2c"
+
+	property Entity btnTimeAttack = "1e64ed38-a3bd-4eb3-a8b9-8904f1bebab4"
+
+	-- Challenge-mode entry currency label on BtnChallenge (CoinInfoText). Populated from the
+	-- cached client meta status; was never bound before, so the label rendered blank.
+	property TextComponent coinText = "24bf5136-f068-40a7-ad3f-c6fa5cd26176"
+
+	-- Top currency bar pills (reference lobby): coin=meso, dia=redMeso, energy=energy/MAX.
+	property TextComponent coinPillText = "6f979f5a-87ce-4965-ad36-02a5e65904cb"
+
+	property TextComponent diaPillText = "2b60c0f5-469d-4497-9635-143de3a02e95"
+
+	property TextComponent energyPillText = "1c406852-03c6-426b-aef6-d1e1646854ab"
+
+	-- "게임 시작" primary CTA → StageSelect; bottom "내실" button → MetaGrowth popup.
+	property Entity gameStartBtn = "32404c1b-3436-4658-99b7-88e0581c5081"
+
+	property Entity btnGrowth = "e89d32ec-9840-4174-b4aa-399eaf6d041e"
+
+	-- 최근 진행 card: last-played stage + 이어서 하기. Backed by ModeStageLogic.ClientProgress.
+	property Entity btnContinue = "5fa90f90-3f5e-4288-a404-f5be73e24177"
+
+	property TextComponent recentStageText = "e1f6d0b2-4953-4193-baf0-f7afa168b797"
+
+	property TextComponent recentSubText = "14e7f71d-e60e-4dc2-b51a-b0a851f2d5d4"
+
+	property TextComponent recentWaveText = "8f0deac9-8447-43b1-942a-bfe0dfeec898"
+
+	property TextComponent recentThumbText = "bc8f3c6b-fb2f-4cdb-98c5-e537e3cfc087"
+
+	-- Character showcase (reference lobby): the UI avatar + its prev/next arrows + the build/level labels.
+	property Entity showcaseAvatar = "5d8983de-0386-4cb3-9c70-166fcfc34df1"
+
+	property Entity charPrevBtn = "d951ec23-9b0c-4a62-80da-4a710721816f"
+
+	property Entity charNextBtn = "825d2e6e-52fb-4cbd-979e-5c172be6c10e"
+
+	property TextComponent buildValText = "5cd8c18e-eef6-4fa0-8815-cd383fd21501"
+
+	property TextComponent levelText = "b1110283-e03c-4abc-b3d5-0f04d379d749"
+
+	-- 0=warrior 1=archer 2=mage 3=thief; cycled by the showcase arrows.
+	property integer selectedJobIndex = 0
+
+	-- Display level for the "오늘의 빌드 추천" showcase — a design flavor value advertising a
+	-- representative recommended build, NOT the player's real account level.
+	property integer SHOWCASE_LEVEL = 15
+
+	-- Player identity (body/hair/face) captured from the account avatar so the showcase keeps the
+	-- player's own face while only the job outfit+weapon are overridden. Must be captured BEFORE
+	-- UseCustomEquipOnly is flipped on, otherwise GetEquip returns the emptied custom slots.
+	property string idBody = ""
+
+	property string idHair = ""
+
+	property string idFace = ""
+
+	property string idEar = ""
+
+	property string idFaceAcc = ""
+
+	-- Identity capture is deferred until the account avatar finishes compositing (GetEquip(Body)
+	-- returns non-empty). Bounded retry so a missing account avatar still falls back to defaults.
+	property boolean identityReady = false
+
+	property integer identityAttempts = 0
+
+	property string CLICK_SFX_RUID = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string HOVER_SFX_RUID = "159bf70a74634bfc8e91a29e527a4be5"
+
+	-- { target, evType, evHandler } records released in OnEndPlay
+	property table eventRecords = {}
+
+	property integer walletTimerId = 0
+
+	-- Deferred entity wiring: bound buttons are invalid until the client UI group instantiates.
+	property boolean wired = false
+
+	-- RequestSyncMetaStatus needs a valid LocalPlayer; retried until ready (see OnUpdate).
+	property boolean metaSyncRequested = false
+
+	-- RequestProgressSync (recent-progress card) likewise needs a valid LocalPlayer.
+	property boolean progressSyncRequested = false
+
+	method void OnBeginPlay()
+		-- Lobby is the DefaultShow=true entry screen; the wallet loop is safe (guarded), wiring is deferred.
+		self.walletTimerId = _TimerService:SetTimerRepeat(self.RefreshWallet, 0.5)
+		log("[UILobbyLogic] OnBeginPlay")
+	end
+
+	method void OnUpdate(number delta)
+		-- One-shot button wiring; meta-status sync waits for LocalPlayer separately.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+		if not self.metaSyncRequested and isvalid(_UserService.LocalPlayer) then
+			_PlayerDataLogic:RequestSyncMetaStatus()
+			self.metaSyncRequested = true
+		end
+		if not self.progressSyncRequested and isvalid(_UserService.LocalPlayer) then
+			_ModeStageLogic:RequestProgressSync()
+			self.progressSyncRequested = true
+		end
+		-- Capture the player's identity once the showcase avatar has composited, then dress it.
+		if self.wired and not self.identityReady then
+			self:TryCaptureIdentity()
+		end
+	end
+
+	method boolean TryWire()
+		-- All lobby action entities must be valid before connecting handlers (same DefaultShow=true group).
+		if not isvalid(self.btnStory) or not isvalid(self.btnChallenge) or not isvalid(self.btnTimeAttack) then
+			return false
+		end
+		if not isvalid(self.gameStartBtn) or not isvalid(self.btnContinue) or not isvalid(self.btnGrowth) then
+			return false
+		end
+		self:WireModeButton(self.btnStory, "STORY")
+		self:WireModeButton(self.btnChallenge, "CHALLENGE")
+		self:WireModeButton(self.btnTimeAttack, "TIME_ATTACK")
+		self:WireCharShowcase()
+		self:WireLobbyActions()
+		return true
+	end
+
+	method void WireLobbyActions()
+		-- "게임 시작" → StageSelect (STORY). "이어서 하기" → resume last stage. "내실" → MetaGrowth popup.
+		local startHandler = self.gameStartBtn:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+			log("[UILobbyLogic] game start -> stage select")
+			_UIRouterLogic:GoStageSelect("STORY")
+		end)
+		table.insert(self.eventRecords, { target = self.gameStartBtn, evType = ButtonClickEvent, evHandler = startHandler })
+		local continueHandler = self.btnContinue:ConnectEvent(ButtonClickEvent, function()
+			self:OnContinueClicked()
+		end)
+		table.insert(self.eventRecords, { target = self.btnContinue, evType = ButtonClickEvent, evHandler = continueHandler })
+		local growthHandler = self.btnGrowth:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+			log("[UILobbyLogic] open 내실 (MetaGrowth)")
+			_UIMetaGrowthPopupLogic:Open()
+		end)
+		table.insert(self.eventRecords, { target = self.btnGrowth, evType = ButtonClickEvent, evHandler = growthHandler })
+	end
+
+	method void OnContinueClicked()
+		-- Resume = jump to StageSelect, which auto-focuses ClientProgress.lastPlayedStageId for the
+		-- job/skill pick (loadout is required before entry, so we cannot one-tap into the board).
+		_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+		local progress = _ModeStageLogic.ClientProgress or {}
+		local lastId = progress.lastPlayedStageId
+		if lastId == nil or lastId == "" then
+			_UIToastLogic:ShowMessage("진행한 기록이 없습니다")
+			return
+		end
+		-- ClientProgress tracks only the last stage, not the last MODE; STORY is the resume context
+		-- (RefreshNodes there auto-focuses lastPlayedStageId for the job/skill pick).
+		log("[UILobbyLogic] continue -> stage select, focus=" .. lastId)
+		_UIRouterLogic:GoStageSelect("STORY")
+	end
+
+	method void WireCharShowcase()
+		-- Prev/Next arrows cycle the showcased job. The initial ApplyJob is deferred until the
+		-- account identity is captured (see TryCaptureIdentity), so it is not called here.
+		if isvalid(self.charPrevBtn) then
+			local ph = self.charPrevBtn:ConnectEvent(ButtonClickEvent, function()
+				self:CycleJob(-1)
+			end)
+			table.insert(self.eventRecords, { target = self.charPrevBtn, evType = ButtonClickEvent, evHandler = ph })
+		end
+		if isvalid(self.charNextBtn) then
+			local nh = self.charNextBtn:ConnectEvent(ButtonClickEvent, function()
+				self:CycleJob(1)
+			end)
+			table.insert(self.eventRecords, { target = self.charNextBtn, evType = ButtonClickEvent, evHandler = nh })
+		end
+	end
+
+	method string SafeEquip(any costume, any category)
+		-- GetEquip returns nil for an unequipped slot; normalize to empty string.
+		local v = costume:GetEquip(category)
+		if v == nil then
+			return ""
+		end
+		return v
+	end
+
+	method void TryCaptureIdentity()
+		-- Snapshot the player's own body/hair/face from the account avatar (while UseCustomEquipOnly
+		-- is still false), then dress the showcase. Retries until the avatar composites, with a bounded
+		-- fallback so a missing account avatar still renders the default body + job outfit.
+		if not isvalid(self.showcaseAvatar) then
+			return
+		end
+		local costume = self.showcaseAvatar.CostumeManagerComponent
+		if not isvalid(costume) then
+			return
+		end
+		self.identityAttempts = self.identityAttempts + 1
+		-- The account avatar usually composites within ~1s (~60 frames); 120 frames is a 2x margin
+		-- before falling back to the engine default body so the showcase always renders something.
+		local body = self:SafeEquip(costume, MapleAvatarItemCategory.Body)
+		if body == "" and self.identityAttempts < 120 then
+			return
+		end
+		self.idBody = body
+		self.idHair = self:SafeEquip(costume, MapleAvatarItemCategory.Hair)
+		self.idFace = self:SafeEquip(costume, MapleAvatarItemCategory.Face)
+		self.idEar = self:SafeEquip(costume, MapleAvatarItemCategory.Ear)
+		self.idFaceAcc = self:SafeEquip(costume, MapleAvatarItemCategory.FaceAccessory)
+		self.identityReady = true
+		self:ApplyJob(self.selectedJobIndex)
+	end
+
+	method table GetJobShowcase(integer index)
+		-- Per-job showcase data: gameplay jobId (the authoritative run job — matches _CombatConfig:GetJobIds),
+		-- display name, build tagline, job outfit (longcoat) + weapon (verified RUIDs). is2H routes the weapon
+		-- slot. jobId travels with the row so a reorder of either list cannot desync the carried job.
+		local jobs = {
+			{ jobId = "warrior", name = "전사", build = "화염의 전사", longcoat = "397dd0fb804c44da94057818f94f68bf", weapon = "447d6b79023545e892581dbcc09a003e", is2H = false },
+			{ jobId = "archer", name = "궁수", build = "명사수 궁수", longcoat = "fdad20c644ec4371a5b0caa135baccf5", weapon = "b38cb173f5554259aeafaeb9f7afd948", is2H = true },
+			{ jobId = "mage", name = "마법사", build = "대마법사", longcoat = "b89184a243fc4047a3a858b7af8517ba", weapon = "989be911209545fdacf84f92874cb338", is2H = false },
+			{ jobId = "thief", name = "도적", build = "그림자 도적", longcoat = "28625b9456224bf69f66768a15e2d649", weapon = "11ccce1ca9224050897b2d59fe14a3bf", is2H = false },
+		}
+		return jobs[(index % 4) + 1]
+	end
+
+	method string ResolveShowcaseJobId()
+		-- The showcased job IS the run's job (selected here in the lobby, not re-picked in stage-select).
+		return self:GetJobShowcase(self.selectedJobIndex).jobId
+	end
+
+	method void CycleJob(integer dir)
+		-- Wrap 0..3 in either direction.
+		self.selectedJobIndex = (self.selectedJobIndex + dir + 4) % 4
+		_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+		self:ApplyJob(self.selectedJobIndex)
+	end
+
+	method void ApplyJob(integer index)
+		-- Dress the showcase avatar: keep the player's own face/hair/body identity, but take full
+		-- control of the outfit so the job longcoat actually renders. UseCustomEquipOnly=true is
+		-- REQUIRED — with it false the account's own coat/longcoat occupies the same slot and silently
+		-- hides the job longcoat (the item equips but never paints).
+		if not isvalid(self.showcaseAvatar) then
+			return
+		end
+		local costume = self.showcaseAvatar.CostumeManagerComponent
+		if not isvalid(costume) then
+			return
+		end
+		local job = self:GetJobShowcase(index)
+		costume.UseCustomEquipOnly = true
+		costume.CustomBodyEquip = self.idBody
+		costume.CustomHairEquip = self.idHair
+		costume.CustomFaceEquip = self.idFace
+		costume.CustomEarEquip = self.idEar
+		costume.CustomFaceAccessoryEquip = self.idFaceAcc
+		-- Longcoat occupies both coat + pants slots; keep those empty so it is the dominant outfit.
+		costume.CustomCoatEquip = ""
+		costume.CustomPantsEquip = ""
+		costume.CustomLongcoatEquip = job.longcoat
+		if job.is2H then
+			costume.CustomTwoHandedWeaponEquip = job.weapon
+			costume.CustomOneHandedWeaponEquip = ""
+		else
+			costume.CustomOneHandedWeaponEquip = job.weapon
+			costume.CustomTwoHandedWeaponEquip = ""
+		end
+		if isvalid(self.buildValText) then
+			self.buildValText.Text = job.build
+		end
+		if isvalid(self.levelText) then
+			self.levelText.Text = "Lv." .. tostring(self.SHOWCASE_LEVEL) .. "  ·  " .. job.name
+		end
+		log("[UILobbyLogic] showcase job=" .. job.name)
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of handlers and the wallet timer.
+		for _, rec in ipairs(self.eventRecords) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.eventRecords = {}
+		if self.walletTimerId ~= 0 then
+			_TimerService:ClearTimer(self.walletTimerId)
+			self.walletTimerId = 0
+		end
+	end
+
+	method void WireModeButton(Entity btn, string modeId)
+		-- Closure captures modeId so the three buttons share one handler path.
+		if not isvalid(btn) then
+			log_warning("[UILobbyLogic] mode button missing: " .. modeId)
+			return
+		end
+		local capturedMode = modeId
+		local clickHandler = btn:ConnectEvent(ButtonClickEvent, function()
+			self:OnModeClicked(capturedMode)
+		end)
+		table.insert(self.eventRecords, { target = btn, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = btn:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.HOVER_SFX_RUID, 1)
+		end)
+		table.insert(self.eventRecords, { target = btn, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	method void OnModeClicked(string modeId)
+		-- Entry costs are validated server-side at RequestEnterStage; the lobby only navigates.
+		_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+		log("[UILobbyLogic] mode selected: " .. modeId)
+		_UIRouterLogic:GoStageSelect(modeId)
+	end
+
+	method void SetText(any textComp, string value)
+		-- Guarded text setter so a single missing label never blocks the rest of the refresh.
+		if isvalid(textComp) then
+			textComp.Text = value
+		end
+	end
+
+	method string CurrencyStr(any value)
+		-- A field that is nil before the first full meta sync would render as the literal "nil";
+		-- show a dash placeholder instead.
+		if value == nil then
+			return "-"
+		end
+		return tostring(value)
+	end
+
+	method void RefreshWallet()
+		-- Pull model: PlayerDataLogic caches the last SyncMetaStatus push client-side (GetClientMetaStatus).
+		-- Drives the top currency pills (coin=meso, dia=redMeso, energy=energy/MAX); the legacy
+		-- BtnChallenge coin label is kept in sync too.
+		local status = _PlayerDataLogic:GetClientMetaStatus()
+		if status == nil then
+			self:SetText(self.coinPillText, "-")
+			self:SetText(self.diaPillText, "-")
+			self:SetText(self.energyPillText, "-")
+			self:SetText(self.coinText, "챌린지 코인 -")
+			self:RefreshRecent()
+			return
+		end
+		self:SetText(self.coinPillText, self:CurrencyStr(status.meso))
+		self:SetText(self.diaPillText, self:CurrencyStr(status.redMeso))
+		if status.energy ~= nil then
+			self:SetText(self.energyPillText, tostring(status.energy) .. " / " .. tostring(_BmBalance.ENERGY_MAX))
+		else
+			self:SetText(self.energyPillText, "-")
+		end
+		if status.challengeCoin ~= nil then
+			self:SetText(self.coinText, "챌린지 코인 " .. tostring(status.challengeCoin))
+		else
+			self:SetText(self.coinText, "챌린지 코인 -")
+		end
+		self:RefreshRecent()
+	end
+
+	method void RefreshRecent()
+		-- 최근 진행 card from ModeStageLogic.ClientProgress: last-played stage name + a real cleared count.
+		-- 이어서 하기 is disabled until there is a record to resume.
+		local progress = _ModeStageLogic.ClientProgress or {}
+		local lastId = progress.lastPlayedStageId
+		local hasProgress = (lastId ~= nil and lastId ~= "")
+		if isvalid(self.btnContinue) then
+			self.btnContinue.Enable = hasProgress
+		end
+		if not hasProgress then
+			self:SetText(self.recentStageText, "새로운 모험")
+			self:SetText(self.recentSubText, "첫 스테이지부터 시작")
+			self:SetText(self.recentThumbText, "NEW")
+			self:SetText(self.recentWaveText, "클리어  ⭐ 0")
+			return
+		end
+		local cfg = _StageCatalogLogic:GetStageConfig(lastId)
+		local stageName = lastId
+		if cfg ~= nil and cfg.name ~= nil then
+			stageName = cfg.name
+		end
+		self:SetText(self.recentStageText, stageName)
+		self:SetText(self.recentSubText, "[" .. lastId .. "] 진행 중")
+		self:SetText(self.recentThumbText, stageName)
+		local clearedCount = 0
+		local cleared = progress.cleared or {}
+		-- ModeStageLogic whitelists cleared flags as strict booleans, so == true is exact here.
+		for _, isCleared in pairs(cleared) do
+			if isCleared == true then
+				clearedCount = clearedCount + 1
+			end
+		end
+		self:SetText(self.recentWaveText, "클리어  ⭐ " .. tostring(clearedCount))
+	end
+
+end

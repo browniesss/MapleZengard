@@ -1,0 +1,402 @@
+@Logic
+script UIMetaGrowthPopupLogic extends Logic
+
+	-- Entity refs injected by UIBuilder bind (C-21) — ui/MetaGrowthPopup.ui
+	property Entity rootGroup = "61f0fc06-f38e-43cb-9578-e7a214221701"
+
+	property Entity btnClose = "921f77a7-b031-4d86-96a6-c5f249e7e2e5"
+
+	property Entity mesoText = "04f14e6f-091b-4bc6-856f-62548bc6e8c8"
+
+	property Entity redMesoText = "06a21be1-7367-4322-8aee-c39399ae4d64"
+
+	property Entity statRowAtk = "c948bcc4-29a6-415b-8377-9c60f3abcbda"
+
+	property Entity statRowExp = "514a9e8c-f863-49d0-9567-54d50b23d507"
+
+	property Entity statRowLoot = "a003c7f2-b7e5-4548-91a4-af762dbeed9c"
+
+	property Entity equipRowWeapon = "3dda2d29-e54c-4b49-b28f-864a03798a1c"
+
+	property Entity equipRowArmor = "a4e93d59-77ec-4d32-87c9-1a26927004de"
+
+	property Entity equipRowCharm = "6684d983-f9ef-4335-a4a9-c93a133d8b92"
+
+	-- ui-sound.md default UI SFX RUIDs
+	property string clickSfxRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSfxRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property any statRows = nil
+
+	property any equipRows = nil
+
+	property boolean isOpen = false
+
+	-- Last SyncGrowthState payload; "" forces a refresh on the next push.
+	property string lastGrowthJson = ""
+
+	-- Parsed metaGrowth section (MASTER_PLAN §6 schema).
+	property any growth = nil
+
+	property any lastStatus = nil
+
+	-- DefaultShow=false: child entities don't exist until the popup is first Enabled, so wiring is deferred.
+	property boolean wired = false
+
+	property table buttonHandlers = {}
+
+	-- Background screens (lobby / stage-select) hidden while the modal is open. Top-level UIGroup render
+	-- order here is NOT driven by GroupOrder (the lobby title draws OVER the popup's full-screen dimmer
+	-- even though the popup group has a higher GroupOrder), so a dimmer alone cannot suppress it. We hide
+	-- whichever background screen is actually shown and restore exactly those on close.
+	property table occludedGroups = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Builds the row lookup maps; button wiring waits for TryWire (children spawn only when Enabled).
+		self.statRows = { atk = self.statRowAtk, exp = self.statRowExp, loot = self.statRowLoot }
+		self.equipRows = { weapon = self.equipRowWeapon, armor = self.equipRowArmor, charm = self.equipRowCharm }
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		log("[UIMetaGrowthPopup] OnBeginPlay")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- One-shot wiring once close button and all stat/equip rows are valid; false retries next frame.
+		if not isvalid(self.btnClose) then
+			return false
+		end
+		for _, statKey in ipairs(_MetaGrowthBalance:GetAllStatKeys()) do
+			if not isvalid(self.statRows[statKey]) then
+				return false
+			end
+		end
+		for _, slotKey in ipairs(_MetaGrowthBalance:GetAllEquipSlotKeys()) do
+			if not isvalid(self.equipRows[slotKey]) then
+				return false
+			end
+		end
+		self:WireButton(self.btnClose, function() self:Close() end)
+		-- The close button's sprite ships with RaycastTarget=false, so its ButtonComponent never
+		-- receives the click and the popup can't be closed. Force it on (verified: upgrade buttons
+		-- which work have RaycastTarget=true). Enforced here so it survives any .ui re-import.
+		local closeSpr = self.btnClose.SpriteGUIRendererComponent
+		if isvalid(closeSpr) then
+			closeSpr.RaycastTarget = true
+		end
+		for _, statKey in ipairs(_MetaGrowthBalance:GetAllStatKeys()) do
+			local capturedKey = statKey
+			self:WireButton(self.statRows[statKey]:GetChildByName("BtnUpgrade", false), function() self:OnStatUpgradeClicked(capturedKey) end)
+		end
+		for _, slotKey in ipairs(_MetaGrowthBalance:GetAllEquipSlotKeys()) do
+			local capturedSlot = slotKey
+			self:WireButton(self.equipRows[slotKey]:GetChildByName("BtnAction", false), function() self:OnEquipActionClicked(capturedSlot) end)
+		end
+		log("[UIMetaGrowthPopup] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Releases every button handler taken in OnBeginPlay.
+		for _, rec in ipairs(self.buttonHandlers) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.buttonHandlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity btnEntity, any onClick)
+		-- Centralizes click/hover SFX (ui-sound.md defaults) around the action callback.
+		if not isvalid(btnEntity) then
+			log_warning("[UIMetaGrowthPopup] WireButton: invalid button entity")
+			return
+		end
+		local clickHandler = btnEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSfxRuid, 1.0)
+			if onClick ~= nil then
+				onClick()
+			end
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = btnEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSfxRuid, 0.6)
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- Modal entry point (MetaHud 내실 button); pulls fresh growth + currency state.
+		-- 내실 is a lobby/stage-select feature only. In-game the MetaHud button is hidden, but
+		-- guard the call too so no other path can open it over the board during a run.
+		if _UIRouterLogic:GetCurrentScreen() == "GameHud" then
+			log("[UIMetaGrowthPopup] open blocked: not available in-game")
+			return
+		end
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = true
+		end
+		self:OccludeBackground()
+		self.isOpen = true
+		self.lastGrowthJson = ""
+		_MetaGrowthLogic:RequestSyncGrowth()
+		_PlayerDataLogic:RequestSyncMetaStatus()
+		log("[UIMetaGrowthPopup] opened")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- Hides the modal; account state stays server-side.
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		self:RestoreBackground()
+		self.isOpen = false
+		log("[UIMetaGrowthPopup] closed")
+	end
+
+	method any FindGroupRoot(Entity child)
+		-- Nearest ancestor owning a UIGroupComponent = that screen's root group.
+		local e = child
+		local hops = 0
+		while isvalid(e) and hops < 12 do
+			if isvalid(e.UIGroupComponent) then
+				return e
+			end
+			e = e.Parent
+			hops = hops + 1
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OccludeBackground()
+		-- Hide every currently-shown background screen (lobby / stage-select) so none renders over the
+		-- modal. Anchors are bound buttons on those screens; an unshown screen's group is skipped.
+		-- Idempotent: a second Open() before Close() must NOT re-capture (the screens are already hidden,
+		-- so it would record an empty set and leave them hidden forever on Close).
+		if #self.occludedGroups > 0 then
+			return
+		end
+		self.occludedGroups = {}
+		local anchors = { _UILobbyLogic.btnStory, _UIStageSelectLogic.btnBack }
+		for _, anchor in ipairs(anchors) do
+			if isvalid(anchor) then
+				local grp = self:FindGroupRoot(anchor)
+				if isvalid(grp) and grp.Enable then
+					grp.Enable = false
+					table.insert(self.occludedGroups, grp)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreBackground()
+		-- Re-show exactly the screens hidden in OccludeBackground (never blanket-enable).
+		for _, grp in ipairs(self.occludedGroups) do
+			if isvalid(grp) then
+				grp.Enable = true
+			end
+		end
+		self.occludedGroups = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Polls the client caches (SyncGrowthState json / SyncMetaStatus table) while open.
+		if not self.isOpen then
+			return
+		end
+		if not self.wired then
+			-- Children exist only once the popup is Enabled (open), so the first attempt lands here.
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+		local json = _MetaGrowthLogic.ClientGrowthJson
+		if json ~= "" and json ~= self.lastGrowthJson then
+			self.lastGrowthJson = json
+			-- JSONDecode (not StringToTable): the growth payload is nested (stats/equips);
+			-- StringToTable flattens it and the nested levels read back as nil → always Lv.0.
+			self.growth = _HttpService:JSONDecode(json)
+			self:RefreshAll()
+		end
+		local status = _PlayerDataLogic:GetClientMetaStatus()
+		if status ~= nil and status ~= self.lastStatus then
+			self.lastStatus = status
+			if isvalid(self.mesoText) then
+				self.mesoText.TextComponent.Text = tostring(status.meso)
+			end
+			if isvalid(self.redMesoText) then
+				self.redMesoText.TextComponent.Text = tostring(status.redMeso)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowGrowthDenied(string reason)
+		-- Server pushes denial reasons here (meso/red meso shortage, max level) for a toast.
+		_UIToastLogic:ShowMessage(reason)
+		log("[UIMetaGrowthPopup] growth denied: " .. reason)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStatUpgradeClicked(string statKey)
+		-- Server validates level cap + meso; the popup re-renders from the resulting push.
+		_MetaGrowthLogic:RequestUpgradeStat(statKey)
+		log("[UIMetaGrowthPopup] stat upgrade requested: " .. statKey)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEquipActionClicked(string slotKey)
+		-- One button covers both purchase (not owned) and enhance (owned) per §7.8.
+		if self.growth == nil then
+			return
+		end
+		local equips = self.growth.equips or {}
+		local equip = equips[slotKey]
+		if equip == nil or equip.own ~= 1 then
+			_MetaGrowthLogic:RequestBuyGrowthEquip(slotKey)
+		else
+			_MetaGrowthLogic:RequestEnhanceGrowthEquip(slotKey)
+		end
+		log("[UIMetaGrowthPopup] equip action requested: " .. slotKey)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAll()
+		-- Renders all 3 stat tracks and 3 equip slots from the parsed growth table.
+		if self.growth == nil then
+			return
+		end
+		for _, statKey in ipairs(_MetaGrowthBalance:GetAllStatKeys()) do
+			self:RefreshStatRow(statKey)
+		end
+		for _, slotKey in ipairs(_MetaGrowthBalance:GetAllEquipSlotKeys()) do
+			self:RefreshEquipRow(slotKey)
+		end
+		log("[UIMetaGrowthPopup] growth state refreshed")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshStatRow(string statKey)
+		-- Level / next-cost rendering for one stat track (§7.8: floor(100×1.5^Lv)).
+		local row = self.statRows[statKey]
+		if not isvalid(row) then
+			return
+		end
+		local stats = self.growth.stats or {}
+		local lv = stats[statKey] or 0
+		local levelText = row:GetChildByName("LevelText", false)
+		if isvalid(levelText) then
+			levelText.TextComponent.Text = "Lv." .. tostring(lv) .. "/" .. tostring(_MetaGrowthBalance.STAT_MAX_LEVEL)
+		end
+		local effectText = row:GetChildByName("EffectText", false)
+		if isvalid(effectText) then
+			local track = _MetaGrowthBalance:GetStatTrack(statKey)
+			local currentEffect = lv * track.perLevel
+			if lv >= _MetaGrowthBalance.STAT_MAX_LEVEL then
+				effectText.TextComponent.Text = "현재 " .. self:FormatPercent(currentEffect) .. "  |  최대"
+			else
+				local nextEffect = (lv + 1) * track.perLevel
+				effectText.TextComponent.Text = "현재 " .. self:FormatPercent(currentEffect) .. "  |  다음 " .. self:FormatPercent(nextEffect)
+			end
+		end
+		local costText = row:GetChildByName("CostText", false)
+		local btn = row:GetChildByName("BtnUpgrade", false)
+		if lv >= _MetaGrowthBalance.STAT_MAX_LEVEL then
+			if isvalid(costText) then
+				costText.TextComponent.Text = "최대 강화"
+			end
+			if isvalid(btn) then
+				btn.ButtonComponent.Enable = false
+			end
+		else
+			if isvalid(costText) then
+				costText.TextComponent.Text = "비용 " .. tostring(_MetaGrowthBalance:GetStatUpgradeCost(lv)) .. " 메소"
+			end
+			if isvalid(btn) then
+				btn.ButtonComponent.Enable = true
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshEquipRow(string slotKey)
+		-- Purchase / enhance state rendering for one meta-equipment slot (§7.8).
+		local row = self.equipRows[slotKey]
+		if not isvalid(row) then
+			return
+		end
+		local def = _MetaGrowthBalance:GetEquipDef(slotKey)
+		local equips = self.growth.equips or {}
+		local equip = equips[slotKey]
+		local levelText = row:GetChildByName("LevelText", false)
+		local costText = row:GetChildByName("CostText", false)
+		local effectText = row:GetChildByName("EffectText", false)
+		local btn = row:GetChildByName("BtnAction", false)
+		if isvalid(effectText) and def ~= nil then
+			effectText.TextComponent.Text = "보유 효과 없음  |  강화 시 " .. self:FormatPercent(def.perLevel)
+		end
+		if equip == nil or equip.own ~= 1 then
+			if isvalid(levelText) then
+				levelText.TextComponent.Text = "미보유"
+			end
+			if isvalid(costText) then
+				costText.TextComponent.Text = "구매가 " .. tostring(def.priceMeso) .. " 메소"
+			end
+			if isvalid(btn) then
+				btn.TextComponent.Text = "구매"
+				btn.ButtonComponent.Enable = true
+			end
+			return
+		end
+		if isvalid(levelText) then
+			levelText.TextComponent.Text = "강화 Lv." .. tostring(equip.lv) .. "/" .. tostring(_MetaGrowthBalance.EQUIP_MAX_ENHANCE_LEVEL)
+		end
+		if isvalid(effectText) and def ~= nil then
+			local currentEffect = equip.lv * def.perLevel
+			if equip.lv >= _MetaGrowthBalance.EQUIP_MAX_ENHANCE_LEVEL then
+				effectText.TextComponent.Text = "현재 " .. self:FormatPercent(currentEffect) .. "  |  최대"
+			else
+				local nextEffect = (equip.lv + 1) * def.perLevel
+				effectText.TextComponent.Text = "현재 " .. self:FormatPercent(currentEffect) .. "  |  다음 " .. self:FormatPercent(nextEffect)
+			end
+		end
+		if equip.lv >= _MetaGrowthBalance.EQUIP_MAX_ENHANCE_LEVEL then
+			if isvalid(costText) then
+				costText.TextComponent.Text = "최대 강화"
+			end
+			if isvalid(btn) then
+				btn.TextComponent.Text = "강화"
+				btn.ButtonComponent.Enable = false
+			end
+			return
+		end
+		local targetLevel = equip.lv + 1
+		local suffix = ""
+		if _MetaGrowthBalance:NeedsRedMesoForEnhance(targetLevel) then
+			suffix = " + 레드메소 " .. tostring(_MetaGrowthBalance.EQUIP_FINAL_ENHANCE_RED_MESO_COST)
+		end
+		if isvalid(costText) then
+			costText.TextComponent.Text = "비용 " .. tostring(_MetaGrowthBalance:GetEquipEnhanceCost(targetLevel)) .. " 메소" .. suffix
+		end
+		if isvalid(btn) then
+			btn.TextComponent.Text = "강화"
+			btn.ButtonComponent.Enable = true
+		end
+	end
+
+	method string FormatPercent(number value)
+		-- Formats multiplier values as compact percentage text for growth rows.
+		return string.format("+%.1f%%", value * 100)
+	end
+
+end

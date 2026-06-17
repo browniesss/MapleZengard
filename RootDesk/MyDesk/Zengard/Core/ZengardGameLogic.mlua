@@ -1,0 +1,475 @@
+@Logic
+script ZengardGameLogic extends Logic
+
+	-- State machine vocabulary: "Lobby" -> "StageSelect" -> "InStage" -> "BossPhase" -> "Clear"/"Fail".
+	-- "StageSelect" is client navigation only; the server never enters it by itself.
+	@Sync property string CurrentState = "Lobby"
+
+	property table runState = {}
+
+	property string currentUserId = ""
+
+	property string currentStageId = ""
+
+	property string currentJobId = ""
+
+	property string currentSkillId = ""
+
+	property string lastResult = ""
+
+	property integer lastFailZen = 0
+
+	property integer killCount = 0
+
+	property table decoders = {}
+
+	property boolean decodersBuilt = false
+
+	property table relayHandlers = {}
+
+	property any bossKilledHandler = nil
+
+	property any bossSpawnedHandler = nil
+
+	property any monsterKilledHandler = nil
+
+	method void OnBeginPlay()
+		-- Server wires the state machine + the server->client event bridge; clients only need decoders.
+		self:EnsureDecoders()
+		if self:IsServer() then
+			self.bossKilledHandler = self:ConnectEvent(BossKilledEvent, self.OnBossKilled)
+			self.bossSpawnedHandler = self:ConnectEvent(BossSpawnedEvent, self.OnBossSpawned)
+			self.monsterKilledHandler = self:ConnectEvent(MonsterKilledEvent, self.OnMonsterKilled)
+			self:ConnectRelays()
+		end
+		log("[ZengardGameLogic] OnBeginPlay state=" .. self.CurrentState)
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of everything connected in OnBeginPlay.
+		if not self:IsServer() then
+			return
+		end
+		if self.bossKilledHandler ~= nil then
+			self:DisconnectEvent(BossKilledEvent, self.bossKilledHandler)
+			self.bossKilledHandler = nil
+		end
+		if self.bossSpawnedHandler ~= nil then
+			self:DisconnectEvent(BossSpawnedEvent, self.bossSpawnedHandler)
+			self.bossSpawnedHandler = nil
+		end
+		if self.monsterKilledHandler ~= nil then
+			self:DisconnectEvent(MonsterKilledEvent, self.monsterKilledHandler)
+			self.monsterKilledHandler = nil
+		end
+		for _, rec in ipairs(self.relayHandlers) do
+			self:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.relayHandlers = {}
+	end
+
+	method void SendGameEvent(any gameEvent)
+		-- Single world event bus entry (§3). Server emitters call this; relay handlers forward to clients.
+		self:SendEvent(gameEvent)
+	end
+
+	method boolean IsInStage()
+		-- True during the playable phases (zen guard for WaveLogic.RequestZen, §1.2).
+		return self.CurrentState == "InStage" or self.CurrentState == "BossPhase"
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartStage(string userId, string stageId, string jobId, string skillId, table enterRunState)
+		-- §1.1 contract: fixed init order 1..10, then InStage + StageStartedEvent (C-18).
+		if self:IsInStage() then
+			log_warning("[ZengardGameLogic] start rejected: already in stage")
+			return
+		end
+		local cfg = _StageCatalogLogic:GetStageConfig(stageId)
+		if cfg == nil then
+			log_error("[ZengardGameLogic] start rejected: unknown stage " .. stageId)
+			return
+		end
+		if enterRunState == nil then
+			enterRunState = {}
+		end
+		self.currentUserId = userId
+		self.currentStageId = stageId
+		self.currentJobId = jobId
+		self.currentSkillId = skillId
+		self.runState = enterRunState
+		self.killCount = 0
+		self.lastResult = ""
+		self.lastFailZen = 0
+		_BoardLogic:ResetBoard()
+		_BoardLogic:SetBoardVisible(true)
+		_MonsterLogic:ResetForStage()
+		_WaveLogic:ResetWave(stageId)
+		_SkillInventoryLogic:ResetUser(userId)
+		_GrowthLogic:InitForStage(userId, jobId)
+		_EquipmentLogic:ClearRunState(userId)
+		_LootLogic:ResetRun(userId)
+		_RerollLogic:ResetRun(userId)
+		_CompanionLogic:ResetRun()
+		_JobLogic:SetJob(userId, jobId)
+		_SkillInventoryLogic:GrantSkill(userId, skillId)
+		_WaveLogic:RepositionPlayer()
+		self.CurrentState = "InStage"
+		local mode = enterRunState.modeId or ""
+		local ev = StageStartedEvent()
+		ev.stageId = stageId
+		ev.mode = mode
+		self:SendGameEvent(ev)
+		log("[ZengardGameLogic] stage started: " .. stageId .. " mode=" .. mode .. " user=" .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResumeStage(string userId)
+		-- STORY continue (D3): full §1.1 re-init, then the zen counter is restored so the run resumes at the failed zen.
+		if self.lastResult ~= "FAIL" or self.currentUserId ~= userId or self.currentStageId == "" then
+			log_warning("[ZengardGameLogic] resume rejected: user=" .. userId)
+			return
+		end
+		local resumeZen = self.lastFailZen
+		self:StartStage(userId, self.currentStageId, self.currentJobId, self.currentSkillId, self.runState)
+		if self:IsInStage() and resumeZen > 0 then
+			-- Direct @Sync write: WaveLogic exposes no setter and ResetWave just zeroed it.
+			_WaveLogic.CurrentZen = resumeZen
+		end
+		log("[ZengardGameLogic] stage resumed: " .. self.currentStageId .. " zen=" .. resumeZen)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void NotifyStageFailed(string reason)
+		-- Fail entry point (monster_overflow from WaveLogic §1.2-7, abandon from ModeStageLogic).
+		reason = reason or ""
+		if not self:IsInStage() then
+			log_warning("[ZengardGameLogic] fail ignored: not in stage, reason=" .. reason)
+			return
+		end
+		self.lastFailZen = _WaveLogic.CurrentZen
+		self:EndStage("FAIL", reason)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void NotifyStageCleared()
+		-- Clear entry point (boss kill, §1.3).
+		if not self:IsInStage() then
+			log_warning("[ZengardGameLogic] clear ignored: not in stage")
+			return
+		end
+		self:EndStage("CLEAR", "boss_killed")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndStage(string result, string reason)
+		-- Common terminal transition: state -> Clear/Fail, emit StageEndedEvent (C-19), then idle at Lobby.
+		-- reason may arrive nil (e.g. EndStage("CLEAR") called with one arg); normalize before any
+		-- concat (L184 log) or event-field assignment (L188) to avoid a nil-concat runtime error.
+		reason = reason or ""
+		if result == "CLEAR" then
+			self.CurrentState = "Clear"
+		else
+			self.CurrentState = "Fail"
+		end
+		self.lastResult = result
+		local startedAt = self.runState.startedAt or _UtilLogic.ServerElapsedSeconds
+		local stats = {
+			userId = self.currentUserId,
+			stageId = self.currentStageId,
+			mode = self.runState.modeId or "",
+			reachedZen = _WaveLogic.CurrentZen,
+			kills = self.killCount,
+			elapsedMs = math.floor((_UtilLogic.ServerElapsedSeconds - startedAt) * 1000),
+		}
+		if result == "CLEAR" then
+			log("[ZengardGameLogic] stage cleared: " .. self.currentStageId .. " zen=" .. stats.reachedZen .. " kills=" .. stats.kills)
+		else
+			log("[ZengardGameLogic] stage failed: " .. reason .. " stage=" .. self.currentStageId .. " zen=" .. stats.reachedZen)
+		end
+		local ev = StageEndedEvent()
+		ev.result = result
+		ev.reason = reason
+		ev.stats = stats
+		self:SendGameEvent(ev)
+		-- Stage over: hide the world board before returning to Lobby so it never shows behind menu UI.
+		_BoardLogic:SetBoardVisible(false)
+		self.CurrentState = "Lobby"
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossKilled(BossKilledEvent event)
+		-- §1.3: boss kill drives the clear transition.
+		log("[ZengardGameLogic] boss killed by " .. event.attackerUserId)
+		self:NotifyStageCleared()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossSpawned(BossSpawnedEvent event)
+		-- InStage -> BossPhase when the boss actually lands on the board.
+		if self.CurrentState == "InStage" then
+			self.CurrentState = "BossPhase"
+			log("[ZengardGameLogic] boss phase entered: " .. event.typeId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(MonsterKilledEvent event)
+		-- Run statistics for StageEndedEvent.stats.
+		if self:IsInStage() then
+			self.killCount = self.killCount + 1
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ConnectRelays()
+		-- Logic.SendEvent dispatches only on the side it was called (Logic.d.mlua). Client UI logics
+		-- subscribe on the client-side bus (§2.2), so every server-emitted game event is mirrored to clients.
+		self:AddRelay("StageStartedEvent", StageStartedEvent, function(e)
+			return { stageId = e.stageId, mode = e.mode }
+		end)
+		self:AddRelay("StageEndedEvent", StageEndedEvent, function(e)
+			return { result = e.result, reason = e.reason, stats = e.stats }
+		end)
+		self:AddRelay("ZenStartedEvent", ZenStartedEvent, function(e)
+			return { zenIndex = e.zenIndex, isBossZen = e.isBossZen, spawnedCount = e.spawnedCount }
+		end)
+		self:AddRelay("MonsterKilledEvent", MonsterKilledEvent, function(e)
+			return { monsterId = e.monsterId, typeId = e.typeId, col = e.col, row = e.row, attackerUserId = e.attackerUserId, exp = e.exp, isBoss = e.isBoss, drops = e.drops }
+		end)
+		self:AddRelay("MonsterEvolvedEvent", MonsterEvolvedEvent, function(e)
+			return { oldMonsterId = e.oldMonsterId, newMonsterId = e.newMonsterId, newTypeId = e.newTypeId, col = e.col, row = e.row }
+		end)
+		self:AddRelay("BossSpawnedEvent", BossSpawnedEvent, function(e)
+			return { monsterId = e.monsterId, typeId = e.typeId, col = e.col, row = e.row }
+		end)
+		self:AddRelay("BossKilledEvent", BossKilledEvent, function(e)
+			return { monsterId = e.monsterId, attackerUserId = e.attackerUserId, drops = e.drops }
+		end)
+		self:AddRelay("JobSelectedEvent", JobSelectedEvent, function(e)
+			return { userId = e.userId, jobId = e.jobId }
+		end)
+		self:AddRelay("AttackSequenceStartedEvent", AttackSequenceStartedEvent, function(e)
+			return { zenIndex = e.zenIndex }
+		end)
+		self:AddRelay("AttackSequenceEndedEvent", AttackSequenceEndedEvent, function(e)
+			return { zenIndex = e.zenIndex, totalKills = e.totalKills }
+		end)
+		self:AddRelay("LevelUpEvent", LevelUpEvent, function(e)
+			return { userId = e.userId, newLevel = e.newLevel }
+		end)
+		self:AddRelay("ChoiceResolvedEvent", ChoiceResolvedEvent, function(e)
+			return { userId = e.userId, kind = e.kind, id = e.id }
+		end)
+		self:AddRelay("JobAdvancedEvent", JobAdvancedEvent, function(e)
+			return { userId = e.userId, jobKey = e.jobKey, newTier = e.newTier, branch = e.branch }
+		end)
+		self:AddRelay("FusionActivatedEvent", FusionActivatedEvent, function(e)
+			return { userId = e.userId, recipeId = e.recipeId }
+		end)
+		self:AddRelay("SkillFusedEvent", SkillFusedEvent, function(e)
+			return { userId = e.userId, recipeId = e.recipeId, resultSkillId = e.resultSkillId }
+		end)
+		self:AddRelay("CompanionJoinedEvent", CompanionJoinedEvent, function(e)
+			return { companionId = e.companionId, jobGroup = e.jobGroup, secondJob = e.secondJob, initialSkillId = e.initialSkillId }
+		end)
+		self:AddRelay("CompanionOrderChangedEvent", CompanionOrderChangedEvent, function(e)
+			return { companionId = e.companionId, direction = e.direction, skillIds = e.skillIds }
+		end)
+		self:AddRelay("LootChangedEvent", LootChangedEvent, function(e)
+			return { userId = e.userId, amount = e.amount, delta = e.delta, reason = e.reason }
+		end)
+		self:AddRelay("ChoiceExpandedEvent", ChoiceExpandedEvent, function(e)
+			return { userId = e.userId }
+		end)
+		self:AddRelay("EquipmentGrantedEvent", EquipmentGrantedEvent, function(e)
+			return { userId = e.userId, equipId = e.equipId }
+		end)
+		self:AddRelay("RerollUsedEvent", RerollUsedEvent, function(e)
+			return { userId = e.userId, kind = e.kind, remaining = e.remaining }
+		end)
+	end
+
+	method void AddRelay(string eventName, any eventType, any encodeFn)
+		-- Closure carries the event name + field encoder; handlers must be tracked for OnEndPlay disconnect.
+		local relayHandler = self:ConnectEvent(eventType, function(ev)
+			self:RelayToClients(eventName, encodeFn(ev))
+		end)
+		table.insert(self.relayHandlers, { evType = eventType, evHandler = relayHandler })
+	end
+
+	@ExecSpace("Multicast")
+	method void RelayToClients(string eventName, table fields)
+		-- Client side of the bus: rebuild the typed event and dispatch it to client subscribers.
+		-- Multicast also runs on the server; re-dispatching there would re-trigger the relay handler
+		-- (AddRelay) and recurse forever. The server already holds the original typed event, so skip it.
+		if self:IsServer() then
+			return
+		end
+		self:EnsureDecoders()
+		local decode = self.decoders[eventName]
+		if decode == nil then
+			log_warning("[ZengardGameLogic] no decoder for event: " .. eventName)
+			return
+		end
+		self:SendEvent(decode(fields))
+	end
+
+	method void EnsureDecoders()
+		-- Idempotent: RelayToClients may arrive before this side's OnBeginPlay finishes.
+		if self.decodersBuilt then
+			return
+		end
+		self.decodersBuilt = true
+		local d = self.decoders
+		d["StageStartedEvent"] = function(t)
+			local e = StageStartedEvent()
+			e.stageId = t.stageId or ""
+			e.mode = t.mode or ""
+			return e
+		end
+		d["StageEndedEvent"] = function(t)
+			local e = StageEndedEvent()
+			e.result = t.result or ""
+			e.reason = t.reason or ""
+			e.stats = t.stats or {}
+			return e
+		end
+		d["ZenStartedEvent"] = function(t)
+			local e = ZenStartedEvent()
+			e.zenIndex = t.zenIndex or 0
+			e.isBossZen = (t.isBossZen == true)
+			e.spawnedCount = t.spawnedCount or 0
+			return e
+		end
+		d["MonsterKilledEvent"] = function(t)
+			local e = MonsterKilledEvent()
+			e.monsterId = t.monsterId or ""
+			e.typeId = t.typeId or ""
+			e.col = t.col or 0
+			e.row = t.row or 0
+			e.attackerUserId = t.attackerUserId or ""
+			e.exp = t.exp or 0
+			e.isBoss = (t.isBoss == true)
+			e.drops = t.drops or {}
+			return e
+		end
+		d["MonsterEvolvedEvent"] = function(t)
+			local e = MonsterEvolvedEvent()
+			e.oldMonsterId = t.oldMonsterId or ""
+			e.newMonsterId = t.newMonsterId or ""
+			e.newTypeId = t.newTypeId or ""
+			e.col = t.col or 0
+			e.row = t.row or 0
+			return e
+		end
+		d["BossSpawnedEvent"] = function(t)
+			local e = BossSpawnedEvent()
+			e.monsterId = t.monsterId or ""
+			e.typeId = t.typeId or ""
+			e.col = t.col or 0
+			e.row = t.row or 0
+			return e
+		end
+		d["BossKilledEvent"] = function(t)
+			local e = BossKilledEvent()
+			e.monsterId = t.monsterId or ""
+			e.attackerUserId = t.attackerUserId or ""
+			e.drops = t.drops or {}
+			return e
+		end
+		d["JobSelectedEvent"] = function(t)
+			local e = JobSelectedEvent()
+			e.userId = t.userId or ""
+			e.jobId = t.jobId or ""
+			return e
+		end
+		d["AttackSequenceStartedEvent"] = function(t)
+			local e = AttackSequenceStartedEvent()
+			e.zenIndex = t.zenIndex or 0
+			return e
+		end
+		d["AttackSequenceEndedEvent"] = function(t)
+			local e = AttackSequenceEndedEvent()
+			e.zenIndex = t.zenIndex or 0
+			e.totalKills = t.totalKills or 0
+			return e
+		end
+		d["LevelUpEvent"] = function(t)
+			local e = LevelUpEvent()
+			e.userId = t.userId or ""
+			e.newLevel = t.newLevel or 0
+			return e
+		end
+		d["ChoiceResolvedEvent"] = function(t)
+			local e = ChoiceResolvedEvent()
+			e.userId = t.userId or ""
+			e.kind = t.kind or ""
+			e.id = t.id or ""
+			return e
+		end
+		d["JobAdvancedEvent"] = function(t)
+			local e = JobAdvancedEvent()
+			e.userId = t.userId or ""
+			e.jobKey = t.jobKey or ""
+			e.newTier = t.newTier or 0
+			e.branch = t.branch or ""
+			return e
+		end
+		d["FusionActivatedEvent"] = function(t)
+			local e = FusionActivatedEvent()
+			e.userId = t.userId or ""
+			e.recipeId = t.recipeId or ""
+			return e
+		end
+		d["SkillFusedEvent"] = function(t)
+			local e = SkillFusedEvent()
+			e.userId = t.userId or ""
+			e.recipeId = t.recipeId or ""
+			e.resultSkillId = t.resultSkillId or ""
+			return e
+		end
+		d["CompanionJoinedEvent"] = function(t)
+			local e = CompanionJoinedEvent()
+			e.companionId = t.companionId or ""
+			e.jobGroup = t.jobGroup or ""
+			e.secondJob = t.secondJob or ""
+			e.initialSkillId = t.initialSkillId or ""
+			return e
+		end
+		d["CompanionOrderChangedEvent"] = function(t)
+			local e = CompanionOrderChangedEvent()
+			e.companionId = t.companionId or ""
+			e.direction = t.direction or ""
+			e.skillIds = t.skillIds or {}
+			return e
+		end
+		d["LootChangedEvent"] = function(t)
+			local e = LootChangedEvent()
+			e.userId = t.userId or ""
+			e.amount = t.amount or 0
+			e.delta = t.delta or 0
+			e.reason = t.reason or ""
+			return e
+		end
+		d["ChoiceExpandedEvent"] = function(t)
+			local e = ChoiceExpandedEvent()
+			e.userId = t.userId or ""
+			return e
+		end
+		d["EquipmentGrantedEvent"] = function(t)
+			local e = EquipmentGrantedEvent()
+			e.userId = t.userId or ""
+			e.equipId = t.equipId or ""
+			return e
+		end
+		d["RerollUsedEvent"] = function(t)
+			local e = RerollUsedEvent()
+			e.userId = t.userId or ""
+			e.kind = t.kind or ""
+			e.remaining = t.remaining or 0
+			return e
+		end
+	end
+
+end

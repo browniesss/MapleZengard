@@ -1,0 +1,297 @@
+@Logic
+script SkillRangePreviewLogic extends Logic
+
+	-- Client-local highlight pool. Each entry is a world SpriteRenderer entity authored by the design
+	-- team (semi-transparent tile/glow); this logic only positions, tints, and shows/hides them while
+	-- a skill slot is pressed. Pool size = full board (GRID_COLS*GRID_ROWS = 49) so any shape fits.
+
+	-- getResource-verified .model id for the highlight tile sprite. SkillRangeHighlight.model
+	-- (Models/MapObjects/SkillRangeHighlight.model: Id "skillrangehighlight", SpriteRUID
+	-- 74e4a361a0754f32aef7a689fba9264b) drives the pool. The empty-string guard in EnsurePool is a
+	-- defensive fallback only; the id is wired, so the preview spawns real, visible highlights.
+	property string highlightModelId = "skillrangehighlight"
+
+	-- Cell-role tints (alpha-blended over the board art). Range area reads as a soft teal field; the
+	-- auto-targeted nearest monster cell is overpainted red so the player sees the actual hit target.
+	property Color rangeColor = Color(0.25, 0.85, 0.85, 0.40)
+	-- Nearest-target cell: bold, near-opaque red so it reads clearly against the teal range field
+	-- (the 0.55-alpha version was indistinguishable from teal at a glance — range-preview review).
+	property Color targetColor = Color(1.0, 0.12, 0.12, 0.92)
+
+	-- Park position well off the 7x7 board so hidden pool entities never bleed onto the playfield.
+	property Vector3 parkPosition = Vector3(-100, -100, 0)
+
+	property table pool = {}
+	-- Logic-side parallel cell map: poolCells[poolIndex] = { col, row }. Replaces per-entity custom
+	-- attributes (hl._T.col/.row) so the nearest-target recolor never depends on the engine accepting
+	-- arbitrary fields on a spawned entity.
+	property table poolCells = {}
+	property boolean poolReady = false
+	property any stageEndHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Hide the preview if the run ends mid-press so it never leaks over the result screen.
+		log("[SkillRangePreviewLogic] OnBeginPlay")
+		self.stageEndHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Release the bus subscription and drop the pooled entities at world session end.
+		if self.stageEndHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndHandler)
+			self.stageEndHandler = nil
+		end
+		for _, hl in ipairs(self.pool) do
+			if isvalid(hl) then
+				hl:Destroy()
+			end
+		end
+		self.pool = {}
+		self.poolCells = {}
+		self.poolReady = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(any event)
+		-- Force-hide on run end (StageEndedEvent fires before UIResultLogic shows its screen).
+		self:HideSkillRange()
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean EnsurePool()
+		-- Lazily spawns the client-local highlight pool on first use. Returns false (and warns once) when
+		-- the design model id is unset or the local map is not ready, so callers can bail cleanly.
+		if self.poolReady then
+			return true
+		end
+		if self.highlightModelId == "" then
+			log_warning("[SkillRangePreviewLogic] highlightModelId is empty — cannot spawn highlight pool")
+			return false
+		end
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.CurrentMap) then
+			return false
+		end
+		local map = player.CurrentMap
+		local total = _BoardConfig.GRID_COLS * _BoardConfig.GRID_ROWS
+		for i = 1, total do
+			local hl = _SpawnService:SpawnByModelId(self.highlightModelId, "SkillRangeHL_" .. i, self.parkPosition, map)
+			if not isvalid(hl) then
+				log_error("[SkillRangePreviewLogic] SpawnByModelId returned nil for highlightModelId=" .. self.highlightModelId)
+				return false
+			end
+			hl.Visible = false
+			table.insert(self.pool, hl)
+		end
+		self.poolReady = true
+		log("[SkillRangePreviewLogic] pool spawned: " .. tostring(#self.pool))
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowSkillRange(integer slotIndex)
+		-- Public QA/wiring entry: highlights the pressed slot's skill range from the caster's current
+		-- board cell + combat direction. PASSIVE skills have no preview. Pool size caps the visible cells.
+		if not self:EnsurePool() then
+			return
+		end
+		local skillId = self:ResolveSlotSkillId(slotIndex)
+		if skillId == "" then
+			self:HideSkillRange()
+			return
+		end
+		local data = _SkillDataLogic:GetSkillData(skillId)
+		if data == nil then
+			self:HideSkillRange()
+			return
+		end
+		if data.kind == "PASSIVE" or data.shape == nil then
+			-- Passives (kind="PASSIVE", no shape field) always auto-apply; there is no cell range to
+			-- show. The nil-shape guard also bails on any malformed record before the log concat below.
+			self:HideSkillRange()
+			return
+		end
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			self:HideSkillRange()
+			return
+		end
+		-- Undo the player foot offset (-0.40 = half a cell) before WorldToCell so the caster cell does not
+		-- flip to the neighbouring row on a boundary; otherwise the range preview highlights the wrong row.
+		local pwp = player.TransformComponent.WorldPosition
+		local casterCell = _BoardLogic:WorldToCell(Vector3(pwp.x, pwp.y - _BoardConfig.PLAYER_VERTICAL_OFFSET, 0))
+		if casterCell == nil then
+			self:HideSkillRange()
+			return
+		end
+		local direction = self:ResolveDirection()
+		local used = 0
+		if data.shape == "RANGED_TARGET" then
+			used = self:PaintRangedTarget(casterCell, data)
+		else
+			used = self:PaintShapeCells(skillId, casterCell, direction)
+		end
+		self:HideFrom(used + 1)
+		log("[SkillRangePreviewLogic] ShowSkillRange slot=" .. tostring(slotIndex) .. " skill=" .. skillId ..
+			" shape=" .. tostring(data.shape) .. " cells=" .. tostring(used))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideSkillRange()
+		-- Public QA/wiring entry: hides every pooled highlight.
+		self:HideFrom(1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer PaintShapeCells(string skillId, table casterCell, string direction)
+		-- LINE / ADJACENT4 / ADJACENT4_SINGLE / ADJACENT8 share AttackPatternLogic's cell resolver, so
+		-- the preview is byte-identical to the server's hit cells. Returns the count painted.
+		local cells = _AttackPatternLogic:ResolveSkillCells(skillId, casterCell.col, casterCell.row, direction)
+		local count = 0
+		for _, cell in ipairs(cells) do
+			if count >= #self.pool then
+				break
+			end
+			count += 1
+			self:PlaceHighlight(count, cell.col, cell.row, self.rangeColor)
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer PaintRangedTarget(table casterCell, any data)
+		-- RANGED_TARGET shows the whole Chebyshev range as the teal field, then overpaints the actual
+		-- auto-target (nearest alive monster, monsterId tiebreak — mirrors CombatLogic:ResolveTargets) red.
+		local range = data.range or 0
+		local count = 0
+		for col = 0, _BoardConfig.GRID_COLS - 1 do
+			for row = 0, _BoardConfig.GRID_ROWS - 1 do
+				if _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, col, row, range) then
+					if count >= #self.pool then
+						break
+					end
+					count += 1
+					self:PlaceHighlight(count, col, row, self.rangeColor)
+				end
+			end
+		end
+		local nearest = self:FindNearestMonsterCell(casterCell, range)
+		if nearest ~= nil then
+			-- Recolor the existing pooled highlight that already sits on the target cell. The placed-cell
+			-- lookup is the logic-side parallel table, not an entity field.
+			for i = 1, count do
+				local placed = self.poolCells[i]
+				local hl = self.pool[i]
+				if placed ~= nil and placed.col == nearest.col and placed.row == nearest.row then
+					if isvalid(hl) and isvalid(hl.SpriteRendererComponent) then
+						hl.SpriteRendererComponent.Color = self.targetColor
+					end
+					break
+				end
+			end
+			log("[SkillRangePreviewLogic] ranged target cell=(" .. tostring(nearest.col) .. "," .. tostring(nearest.row) .. ")")
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method table FindNearestMonsterCell(table casterCell, integer range)
+		-- Client-side nearest-target resolution mirroring CombatLogic:ResolveTargets (§D-11): scan
+		-- MonsterUnit entities, keep alive ones in Chebyshev range, sort by distance then monsterId.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.CurrentMap) then
+			return nil
+		end
+		local units = player.CurrentMap:GetChildComponentsByTypeName("script.MonsterUnit", true)
+		local candidates = {}
+		for _, comp in ipairs(units) do
+			---@type MonsterUnit
+			local unit = comp
+			if isvalid(unit) and unit.IsDead ~= true and isvalid(unit.Entity) then
+				local cell = _BoardLogic:WorldToCell(unit.Entity.TransformComponent.WorldPosition)
+				if cell ~= nil and _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, cell.col, cell.row, range) then
+					-- Spawn naming contract "<typeId>_mon_<n>" (MonsterLogic:148/175). If a future rename
+					-- breaks the suffix, fall back to the full entity name so the monster still ranks for
+					-- distance instead of vanishing from the highlight; the tiebreak stays a string compare
+					-- consistent with CombatLogic:ResolveTargets (D-11).
+					local monsterId = string.match(unit.Entity.Name, "(mon_%d+)$")
+					if monsterId == nil then
+						monsterId = unit.Entity.Name
+					end
+					table.insert(candidates, { col = cell.col, row = cell.row, monsterId = monsterId })
+				end
+			end
+		end
+		if #candidates == 0 then
+			return nil
+		end
+		table.sort(candidates, function(a, b)
+			local da = math.max(math.abs(a.col - casterCell.col), math.abs(a.row - casterCell.row))
+			local db = math.max(math.abs(b.col - casterCell.col), math.abs(b.row - casterCell.row))
+			if da == db then
+				return a.monsterId < b.monsterId
+			end
+			return da < db
+		end)
+		return candidates[1]
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaceHighlight(integer poolIndex, integer col, integer row, Color color)
+		-- Positions one pooled highlight on a board cell and tints it for its role. SortingLayer/
+		-- IgnoreMapLayerCheck come from the design .model; OrderInLayer is set to board+50 (above the
+		-- board art, below the +100 combat FX) so the overlay reads clearly without hiding skill effects.
+		local hl = self.pool[poolIndex]
+		if not isvalid(hl) then
+			return
+		end
+		local pos = _BoardLogic:CellToWorld(col, row)
+		hl.TransformComponent.WorldPosition = pos
+		self.poolCells[poolIndex] = { col = col, row = row }
+		if isvalid(hl.SpriteRendererComponent) then
+			hl.SpriteRendererComponent.OrderInLayer = _BoardConfig:GetOrderInLayer(row) + 50
+			hl.SpriteRendererComponent.Color = color
+		end
+		hl.Visible = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideFrom(integer startIndex)
+		-- Hides every pooled highlight from startIndex onward (1 hides the whole pool).
+		for i = startIndex, #self.pool do
+			local hl = self.pool[i]
+			if isvalid(hl) then
+				hl.Visible = false
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string ResolveSlotSkillId(integer slotIndex)
+		-- Reads the pressed slot's skillId from the client skill mirror (same source the slot labels use),
+		-- avoiding any extra controller surface. Returns "" when the slot is empty.
+		local snap = _SkillInventoryLogic.clientSkillState
+		if snap == nil or snap.order == nil then
+			return ""
+		end
+		local skillId = snap.order[slotIndex]
+		if skillId == nil then
+			return ""
+		end
+		return skillId
+	end
+
+	@ExecSpace("ClientOnly")
+	method string ResolveDirection()
+		-- LINE previews are direction-dependent; read the live combat direction from the controller so
+		-- the preview tracks the pad. Falls back to the balance default if the controller is unavailable.
+		local direction = _UICombatControlLogic:GetCombatDirection()
+		if direction == nil or direction == "" then
+			return _CombatConfig.DEFAULT_DIRECTION
+		end
+		return direction
+	end
+
+end

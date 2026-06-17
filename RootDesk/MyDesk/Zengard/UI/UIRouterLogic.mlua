@@ -1,0 +1,390 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UIRouterLogic extends Logic
+
+	property string SCREEN_LOBBY = "Lobby"
+
+	property string SCREEN_STAGE_SELECT = "StageSelect"
+
+	property string SCREEN_GAME_HUD = "GameHud"
+
+	-- Secondary groups the router owns for screen-context visibility (IA centralization).
+	-- MetaHud shows in Lobby/StageSelect and is hidden in-game so the board stays uncluttered.
+	property string GROUP_META_HUD = "MetaHudGroup"
+
+	-- Gameplay sub-HUDs: visible only in GameHud. They also self-show on StageStartedEvent and
+	-- self-hide on StageEndedEvent; the router additionally forces them off on any non-GameHud
+	-- screen so a back/abort path that skips StageEndedEvent can never leave them on screen.
+	property string GROUP_SKILL_HUD = "SkillHUDGroup"
+
+	property string GROUP_COMBAT_CONTROL = "CombatControlHUDGroup"
+
+	property string GROUP_WORLD_HP_BAR = "WorldHpBarGroup"
+
+	-- CompanionPanel is hidden by the router off-GameHud, but never force-enabled in GameHud:
+	-- its content is owned by CompanionJoinedEvent (shown only when a companion actually joins).
+	property string GROUP_COMPANION_PANEL = "CompanionPanelGroup"
+
+	property string currentScreen = ""
+
+	-- Last screen whose group toggle was actually applied; "" until groups become valid.
+	property string appliedScreen = ""
+
+	-- Set when GoStageSelect requests a StageSelect mode while groups are not yet valid;
+	-- consumed once the StageSelect group is enabled so OnScreenShown fires post-Enable.
+	property string pendingStageSelectMode = ""
+
+	property string pendingMode = "STORY"
+
+	-- modal queue entries: { popupId, openFn, closeFn } (spec ui-modes-stages §7.6)
+	property table modalQueue = {}
+
+	property string openModalId = ""
+
+	property any openModalCloseFn = nil
+
+	-- Depth of currently-open occluding modals. Self-enabling run modals (Choice / JobAdvance /
+	-- Companion / Result) are NOT serialized by the modal queue, so two can overlap (e.g. the choice
+	-- popup stays open while the job-advance celebration shows on top). A plain boolean toggle let the
+	-- FIRST modal to close restore the side-HUDs while a second modal was still open, bleeding the
+	-- in-game HUD behind it. Reference-count instead: hide on the 0->1 edge, restore only on the 1->0
+	-- edge. ResetModalOcclusion() force-clears it for the discard-all paths (FlushModals).
+	property integer modalOcclusionCount = 0
+
+	property any stageStartedHandler = nil
+
+	property any stageEndedHandler = nil
+
+	-- Deferred entity wiring: @Logic OnBeginPlay runs before client UI groups instantiate.
+	property boolean wired = false
+
+	method void OnBeginPlay()
+		-- Server-bus subscriptions are safe here; group-Enable application is deferred to TryWire.
+		self.stageStartedHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+		self.currentScreen = self.SCREEN_LOBBY
+		log("[UIRouterLogic] OnBeginPlay pending screen=" .. self.currentScreen)
+	end
+
+	method void OnUpdate(number delta)
+		-- One-shot deferred wiring once the three main groups exist as valid entities.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+			return
+		end
+		-- After wiring, a screen change requested while groups were transiently invalid
+		-- stays pending (appliedScreen ~= currentScreen); retry the guarded apply each frame.
+		if self.appliedScreen ~= self.currentScreen then
+			self:TryApplyScreen()
+		end
+	end
+
+	method boolean AllGroupsValid()
+		-- Guard for any group-Enable toggle: all three main-screen roots must exist.
+		if not isvalid(self:GetGroupRoot("LobbyGroup")) then return false end
+		if not isvalid(self:GetGroupRoot("StageSelectGroup")) then return false end
+		if not isvalid(self:GetGroupRoot("GameHUDGroup")) then return false end
+		return true
+	end
+
+	method boolean TryWire()
+		-- All three main-screen group roots must be valid before applying initial exclusivity.
+		if not self:AllGroupsValid() then return false end
+		self:TryApplyScreen()
+		log("[UIRouterLogic] wired screen=" .. self.currentScreen)
+		return true
+	end
+
+	method void OnEndPlay()
+		-- Mandatory release of OnBeginPlay subscriptions.
+		if self.stageStartedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedHandler)
+			self.stageStartedHandler = nil
+		end
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+			self.stageEndedHandler = nil
+		end
+	end
+
+	method Entity GetGroupRoot(string groupName)
+		-- UI group roots live at fixed "/ui/<group>" paths (§5.2 names), so no cross-file UUID binding is needed.
+		return _EntityService:GetEntityByPath("/ui/" .. groupName)
+	end
+
+	method void SetGroupEnabled(string groupName, boolean enabled)
+		-- Show/hide is always Enable, never Visible (runtime-patterns caveat 8).
+		-- Callers must gate via AllGroupsValid(); root is assumed valid here.
+		local root = self:GetGroupRoot(groupName)
+		if isvalid(root) then
+			root.Enable = enabled
+		else
+			log_warning("[UIRouterLogic] group not found: " .. groupName)
+		end
+	end
+
+	method void SetGroupIfValid(string groupName, boolean enabled)
+		-- Secondary-group toggle that no-ops (no warning) until the group root is instantiated.
+		-- Secondary groups (MetaHud / sub-HUDs) aren't part of the AllGroupsValid main-screen gate,
+		-- and DefaultShow=false groups instantiate their root lazily, so a missing root here is
+		-- expected — OnUpdate keeps re-applying until appliedScreen converges with currentScreen.
+		local root = self:GetGroupRoot(groupName)
+		if isvalid(root) then
+			root.Enable = enabled
+		end
+	end
+
+	method void ApplyScreen(string screen)
+		-- Records the desired screen only; the actual group toggle is deferred to
+		-- TryApplyScreen so it never runs before the three group roots are valid.
+		-- currentScreen is the intent (GetCurrentScreen contract); appliedScreen tracks
+		-- what was last toggled. OnUpdate retries until they converge.
+		-- A real screen change ends or restarts a run, so any leftover modal-occlusion depth is stale
+		-- (the Result popup increments occlusion but closes via this navigation, not a paired decrement,
+		-- so its count would otherwise stay latched into the next run and suppress the side-HUD restore).
+		-- Modals never call ApplyScreen (they don't navigate), so this can't clobber a live in-run modal.
+		if screen ~= self.currentScreen then
+			self.modalOcclusionCount = 0
+			-- Dismiss the 내실(MetaGrowth) modal on any real screen change so it never lingers over the
+			-- next screen (e.g. the story/stage-select prep screen). It opens queue-bypass, so FlushModals
+			-- does not cover it; Close() is idempotent (safe when already closed) and does not navigate.
+			_UIMetaGrowthPopupLogic:Close()
+		end
+		self.currentScreen = screen
+		-- Drop a stale StageSelect OnScreenShown if the intent moved off StageSelect before
+		-- the group ever became valid, so it can't fire spuriously after a later transition.
+		if screen ~= self.SCREEN_STAGE_SELECT then
+			self.pendingStageSelectMode = ""
+		end
+		self:TryApplyScreen()
+	end
+
+	method void TryApplyScreen()
+		-- D9: exactly one main screen group enabled at a time — applied only when all
+		-- three roots are valid. Otherwise leave it pending (no warning) for OnUpdate retry.
+		if not self:AllGroupsValid() then return end
+		local screen = self.currentScreen
+		local inGame = (screen == self.SCREEN_GAME_HUD)
+		self:SetGroupEnabled("LobbyGroup", screen == self.SCREEN_LOBBY)
+		self:SetGroupEnabled("StageSelectGroup", screen == self.SCREEN_STAGE_SELECT)
+		self:SetGroupEnabled("GameHUDGroup", inGame)
+		-- MetaHud (메소/에너지/내실 버튼) shows only on StageSelect now: the lobby has its own currency bar
+		-- (reference redesign), so MetaHud would clash with it there. Still hidden in-game.
+		self:SetGroupIfValid(self.GROUP_META_HUD, screen == self.SCREEN_STAGE_SELECT)
+		-- Gameplay sub-HUDs (Skill / CombatControl / WorldHpBar / CompanionPanel) are
+		-- DefaultShow=false and owned by StageStarted/StageEnded self-show/hide. The router does
+		-- NOT enable them on GameHud (their roots may not be instantiated yet, and self-show off
+		-- the same StageStartedEvent already covers it). It only forces them OFF on any
+		-- non-GameHud screen, as a safety net for back/abort paths that skip StageEndedEvent.
+		if not inGame then
+			self:SetGroupIfValid(self.GROUP_SKILL_HUD, false)
+			self:SetGroupIfValid(self.GROUP_COMBAT_CONTROL, false)
+			self:SetGroupIfValid(self.GROUP_WORLD_HP_BAR, false)
+			self:SetGroupIfValid(self.GROUP_COMPANION_PANEL, false)
+		end
+		self.appliedScreen = screen
+		log("[UIRouterLogic] screen changed: " .. screen)
+		-- StageSelect's OnScreenShown must fire after its group is enabled; if GoStageSelect
+		-- queued a mode while groups were invalid, consume it now (post-Enable).
+		if screen == self.SCREEN_STAGE_SELECT and self.pendingStageSelectMode ~= "" then
+			local modeId = self.pendingStageSelectMode
+			self.pendingStageSelectMode = ""
+			_UIStageSelectLogic:OnScreenShown(modeId)
+		end
+	end
+
+	method void GoLobby()
+		-- Result/back navigation entry point.
+		-- Force-close any open run modal (e.g. a job-advance popup) so it can't linger over lobby;
+		-- FlushModals is idempotent (no-ops when nothing is open), so this is safe.
+		self:FlushModals()
+		-- The STAGE CLEAR Result popup is owned by UIResultLogic (it opens by toggling its own
+		-- group root, queue-bypass) and is no longer flushed by FlushModals to avoid the
+		-- StageEnded render race. Close it explicitly here on a real screen change so it can never
+		-- linger over the lobby; CloseResult also resets UIResultLogic.resultOpen for consistency.
+		self:CloseResultModal()
+		self:ApplyScreen(self.SCREEN_LOBBY)
+	end
+
+	method void GoStageSelect(string modeId)
+		-- Lobby mode buttons land here; the mode rides along to StageSelect (spec §4.2).
+		-- Force-close any open run modal first so it never lingers over StageSelect.
+		self:FlushModals()
+		-- Same as GoLobby: explicitly close the Result popup (owned by UIResultLogic, not flushed)
+		-- so a STAGE CLEAR popup can't linger over the StageSelect screen.
+		self:CloseResultModal()
+		self.pendingMode = modeId
+		self.pendingStageSelectMode = modeId
+		self:ApplyScreen(self.SCREEN_STAGE_SELECT)
+		-- If ApplyScreen already enabled the group this frame, TryApplyScreen consumed the
+		-- pending mode and called OnScreenShown. If groups were not valid yet, the call stays
+		-- queued and fires from TryApplyScreen once the group is enabled (no warning meanwhile).
+	end
+
+	method void GoGameHud()
+		-- Entered via StageStartedEvent; HUD sub-groups manage themselves off the same event.
+		self:ApplyScreen(self.SCREEN_GAME_HUD)
+	end
+
+	method string GetCurrentScreen()
+		-- Read-only state for other UI logics.
+		return self.currentScreen
+	end
+
+	method string GetPendingMode()
+		-- Mode chosen in the lobby, valid while StageSelect is open.
+		return self.pendingMode
+	end
+
+	method void ApplyModalHudOcclusion(boolean modalOpen)
+		-- A run modal (Choice/JobAdvance/Companion/Result) must not show the gameplay side-HUDs
+		-- bleeding behind it. Hide Skill / CombatControl HUDs while any modal is open; restore them
+		-- only when back to a clean GameHud screen (their normal owner is StageStarted/StageEnded).
+		-- WorldHpBar (GroupOrder 9) renders above the popups, so it is NOT a blanket SetGroupIfValid
+		-- off here: its bars are state-dependent (live only between StageStarted/StageEnded with damaged
+		-- monsters). UIHpBarManagerLogic owns that state, so occlusion is delegated to it — it snapshots
+		-- the pre-modal Enable state and restores exactly that set on close (never blanket re-enable).
+		-- Reference-counted: overlapping self-enabling modals each open/close independently, so apply the
+		-- visual hide only on the 0->1 edge and the restore only on the 1->0 edge. Without this the first
+		-- modal to close (e.g. job-advance dismissed while the choice popup is still open) would restore
+		-- the side-HUDs behind the second still-open modal.
+		if modalOpen then
+			self.modalOcclusionCount = self.modalOcclusionCount + 1
+			if self.modalOcclusionCount == 1 then
+				self:ApplyOcclusionVisible(true)
+			end
+		else
+			if self.modalOcclusionCount == 0 then
+				return
+			end
+			self.modalOcclusionCount = self.modalOcclusionCount - 1
+			if self.modalOcclusionCount == 0 then
+				self:ApplyOcclusionVisible(false)
+			end
+		end
+	end
+
+	method void ApplyOcclusionVisible(boolean occluded)
+		-- Edge-applied side-HUD visibility for ApplyModalHudOcclusion / ResetModalOcclusion. Restore is
+		-- gated on still being on the GameHud screen so a modal closed during a screen change (the
+		-- result-popup Lobby path) never re-enables the in-game HUD over the new screen.
+		if occluded then
+			self:SetGroupIfValid("GameHUDGroup", false)
+			self:SetGroupIfValid(self.GROUP_SKILL_HUD, false)
+			self:SetGroupIfValid(self.GROUP_COMBAT_CONTROL, false)
+			_UIHpBarManagerLogic:SetModalOccluded(true)
+		elseif self.currentScreen == self.SCREEN_GAME_HUD then
+			self:SetGroupIfValid("GameHUDGroup", true)
+			self:SetGroupIfValid(self.GROUP_SKILL_HUD, true)
+			self:SetGroupIfValid(self.GROUP_COMBAT_CONTROL, true)
+			_UIHpBarManagerLogic:SetModalOccluded(false)
+		else
+			-- Off-GameHud (e.g. result -> lobby): keep the side-HUDs hidden but still release the HP-bar
+			-- modal snapshot so its state machine doesn't stay latched as occluded into the next run.
+			_UIHpBarManagerLogic:SetModalOccluded(false)
+		end
+	end
+
+	method void ResetModalOcclusion()
+		-- Hard clear for discard-all paths (FlushModals): drop every counted modal at once and restore
+		-- in a single edge, so a force-close of several overlapping modals can't leave a residual count
+		-- that suppresses the next restore.
+		if self.modalOcclusionCount == 0 then
+			return
+		end
+		self.modalOcclusionCount = 0
+		self:ApplyOcclusionVisible(false)
+	end
+
+	method void EnqueueModal(string popupId, any openFn, any closeFn)
+		-- Serializes run modals (Choice/JobAdvance/Companion/Result); FIFO covers E14 (advance before companion).
+		table.insert(self.modalQueue, { popupId = popupId, openFn = openFn, closeFn = closeFn })
+		if self.openModalId == "" then
+			self:OpenNextModal()
+		end
+	end
+
+	method void OpenNextModal()
+		-- Pops the queue head and hands control to the owning popup logic via its openFn.
+		if #self.modalQueue == 0 then
+			return
+		end
+		local entry = table.remove(self.modalQueue, 1)
+		self.openModalId = entry.popupId
+		self.openModalCloseFn = entry.closeFn
+		self:ApplyModalHudOcclusion(true)
+		log("[UIRouterLogic] modal opened: " .. entry.popupId)
+		if entry.openFn ~= nil then
+			entry.openFn()
+		end
+	end
+
+	method void NotifyModalClosed(string popupId)
+		-- Popup logics must report close so the next queued modal can open.
+		if self.openModalId ~= popupId then
+			return
+		end
+		self.openModalId = ""
+		self.openModalCloseFn = nil
+		log("[UIRouterLogic] modal closed: " .. popupId)
+		self:OpenNextModal()
+		-- If nothing else queued, the run UI is modal-free again — bring the side-HUDs back.
+		if self.openModalId == "" then
+			self:ApplyModalHudOcclusion(false)
+		end
+	end
+
+	method void FlushModals()
+		-- E3: Result arrival discards queued run modals and force-closes the open one.
+		-- ResultGroup is intentionally NOT touched here: on the StageEnded path the Result popup
+		-- is the modal that must newly appear, and UIResultLogic enables its group off the same
+		-- StageEndedEvent. Disabling ResultGroup here would race that enable (handler order on the
+		-- shared bus is undefined) and leave the populated popup invisible. Residual ResultGroup
+		-- cleanup on a real screen change is handled explicitly by GoLobby/GoStageSelect instead.
+		self.modalQueue = {}
+		-- JobAdvance opens by toggling its group root directly (queue bypass), so openModalId stays
+		-- "" and the early-return below would skip it. Force its root off here — before any
+		-- early-return — so a pending job-advance modal can't linger over the next screen.
+		self:SetGroupIfValid("JobAdvancePopupGroup", false)
+		-- Discard-all clears the whole occlusion depth in one edge. The self-enabling popups bypass
+		-- the queue, so openModalId is normally "" and the early-return below fires first; clearing
+		-- occlusion here (before it) guarantees a force-off job-advance/choice popup that never ran its
+		-- own ClosePopup can't leave the side-HUDs latched off. Must precede the early-return.
+		self:ResetModalOcclusion()
+		if self.openModalId == "" then
+			return
+		end
+		local closeFn = self.openModalCloseFn
+		local closedId = self.openModalId
+		self.openModalId = ""
+		self.openModalCloseFn = nil
+		if closeFn ~= nil then
+			closeFn()
+		end
+		log("[UIRouterLogic] modal force-closed: " .. closedId)
+	end
+
+	method void CloseResultModal()
+		-- Screen-change cleanup for the STAGE CLEAR / FAILED Result popup. It is owned by
+		-- UIResultLogic and not part of the modal queue, so the router closes it through the
+		-- owner's single close path (group OFF + resultOpen reset) rather than poking its root.
+		_UIResultLogic:CloseResult()
+	end
+
+	method void OnStageStarted(StageStartedEvent event)
+		-- Server confirmed entry; switch to the in-game HUD.
+		self.pendingMode = event.mode
+		log("[UIRouterLogic] stage started: " .. event.stageId .. " mode=" .. event.mode)
+		self:GoGameHud()
+	end
+
+	method void OnStageEnded(StageEndedEvent event)
+		-- Run is over: drop every pending run modal so only the Result popup remains (E3/E4).
+		-- result/reason may be nil on a direct (non-relay) event; guard the concat against a nil field.
+		log("[UIRouterLogic] stage ended: " .. (event.result or "") .. " reason=" .. (event.reason or ""))
+		self:FlushModals()
+	end
+
+end

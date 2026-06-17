@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://5cc7dcfb-babc-4b4e-a388-58d8ece5bbf4",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "5cc7dcfb-babc-4b4e-a388-58d8ece5bbf4",
+      "Language": 1,
+      "Name": "UIGameHudLogic",
+      "Type": 5,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

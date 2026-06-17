@@ -1,0 +1,129 @@
+@Logic
+script MonsterBalance extends Logic
+
+	-- MASTER_PLAN §7.7 — single source for monster/boss balance (C-5/C-32).
+
+	property integer EVOLVE_MULTIPLY_ZEN_AGE = 10
+
+	property integer BOSS_SPLIT_ZEN_AGE = 10
+
+	property integer BOSS_AUTO_SPAWN_ZEN = 20
+
+	property number BOSS_HEAL_RATIO = 0.10
+
+	property number BOSS_PATTERN_SUMMON_PROB = 0.35
+
+	property number BOSS_PATTERN_HEAL_PROB = 0.25
+
+	property number EVOLVE_PROB = 0.50
+
+	property number MULTIPLY_PROB = 0.50
+
+	property number BOSS_DROP_RED_MESO_PROB = 0.20
+
+	property integer BOSS_DROP_MESO_AMOUNT = 100
+
+	property integer BOSS_DROP_RED_MESO_AMOUNT = 1
+
+	property number DISSOLVE_DURATION = 0.5
+
+	-- Extra delay after the out-dissolve before the server destroys the entity.
+	property number DESTROY_DELAY_PADDING = 0.1
+
+	property any typeTable = nil
+
+	method void OnInitialize()
+		-- Per-type balance table is needed on both sides (client reads DISSOLVE_DURATION etc.).
+		self:EnsureBuilt()
+	end
+
+	method void OnBeginPlay()
+		-- OnInitialize ordering across @Logic instances is not guaranteed, so re-assert here;
+		-- the typeTable guard makes EnsureBuilt idempotent.
+		self:EnsureBuilt()
+		log("[MonsterBalance] OnBeginPlay")
+	end
+
+	method void EnsureBuilt()
+		-- Lazy guard: other Logics may query GetTypeData before this one's OnInitialize runs.
+		-- Both-side safe (no server-only API): client and server may both read the balance table.
+		if self.typeTable ~= nil then
+			return
+		end
+		self.typeTable = {
+			orangemushroom = {
+				typeId = "orangemushroom",
+				displayName = "주황버섯",
+				modelId = "orangemushroom",
+				-- Test-phase balance: halved from 10 to 5 for faster playtesting (user request).
+				maxHp = 5,
+				exp = 2,
+				isBoss = false,
+				agingAction = "evolve",
+				evolveTo = "zombiemushroom",
+				scale = 0,
+				drops = { { itemId = "orange_mushroom_cap", chance = 0.30, count = 1 } },
+			},
+			stonegolem = {
+				typeId = "stonegolem",
+				displayName = "스톤골렘",
+				modelId = "stonegolem",
+				maxHp = 15,
+				exp = 4,
+				isBoss = false,
+				agingAction = "multiply",
+				evolveTo = "",
+				scale = 0,
+				drops = { { itemId = "golem_stone", chance = 0.30, count = 1 } },
+			},
+			zombiemushroom = {
+				typeId = "zombiemushroom",
+				displayName = "좀비버섯",
+				modelId = "zombiemushroom",
+				maxHp = 20,
+				exp = 4,
+				isBoss = false,
+				agingAction = "none",
+				evolveTo = "",
+				scale = 0,
+				drops = { { itemId = "orange_mushroom_cap", chance = 0.50, count = 1 } },
+			},
+			mushmom = {
+				typeId = "mushmom",
+				displayName = "머쉬맘",
+				modelId = "mushmom",
+				maxHp = 100,
+				exp = 0,
+				isBoss = true,
+				agingAction = "none",
+				evolveTo = "",
+				scale = 0,
+				splitTo = "mushmom_split",
+				summonTypeId = "orangemushroom",
+				-- Boss drop is an exclusive roll (BOSS_DROP_* constants), not this list.
+				drops = {},
+			},
+			mushmom_split = {
+				typeId = "mushmom_split",
+				displayName = "머쉬맘 분신",
+				modelId = "mushmom",
+				-- Sentinel 0: HP is injected by the caller (BossLogic.SplitBoss -> SetMonsterHp) as floor(hp/2).
+				-- SpawnInternal skips the initial @Sync HP write so the client never sees a transient 1 (no flicker).
+				maxHp = 0,
+				exp = 5,
+				isBoss = false,
+				agingAction = "none",
+				evolveTo = "",
+				scale = 0.9,
+				drops = { { itemId = "meso", chance = 1.0, count = 50 } },
+			},
+		}
+	end
+
+	method table GetTypeData(string typeId)
+		-- Returns the balance entry for typeId, or nil for an unknown id.
+		self:EnsureBuilt()
+		return self.typeTable[typeId]
+	end
+
+end

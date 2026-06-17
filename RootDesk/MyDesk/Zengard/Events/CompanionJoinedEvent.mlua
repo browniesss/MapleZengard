@@ -1,0 +1,12 @@
+@Event
+script CompanionJoinedEvent extends EventType
+
+	property string companionId = ""
+
+	property string jobGroup = ""
+
+	property string secondJob = ""
+
+	property string initialSkillId = ""
+
+end

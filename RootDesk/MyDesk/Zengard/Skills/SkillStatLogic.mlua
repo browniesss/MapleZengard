@@ -1,0 +1,84 @@
+@Logic
+script SkillStatLogic extends Logic
+
+	-- ExecSpace left unspecified per contract (§2.1): pure computation, server-call premise.
+
+	method void OnBeginPlay()
+		-- Checkpoint for the verify phase.
+		log("[SkillStat] OnBeginPlay")
+	end
+
+	method table ComputeHitDamage(string ownerId, string skillId, number extraCritChance)
+		-- Single damage entry for one hit (§1.4): base + FLAT_DAMAGE passives, then crit roll.
+		local data = _SkillDataLogic:GetSkillData(skillId)
+		if data == nil then
+			log_warning("[SkillStat] ComputeHitDamage: unknown skillId " .. tostring(skillId))
+			return { damage = 0, isCritical = false }
+		end
+
+		local lv = _SkillInventoryLogic:GetSkillLevel(ownerId, skillId)
+		if lv < 1 then
+			-- Defensive fallback: combat should never cast an unowned skill.
+			log_warning("[SkillStat] ComputeHitDamage: " .. ownerId .. " does not own " .. skillId .. ", using Lv.1")
+			lv = 1
+		end
+		if lv > _SkillDataLogic.SKILL_MAX_LEVEL then
+			lv = _SkillDataLogic.SKILL_MAX_LEVEL
+		end
+
+		local damage = data.damagePerLv[lv]
+		if damage == nil then
+			log_warning("[SkillStat] ComputeHitDamage: no damage entry for " .. skillId .. " Lv." .. tostring(lv))
+			return { damage = 0, isCritical = false }
+		end
+
+		local critChance = _SkillDataLogic.BASE_CRIT_CHANCE + data.critChanceBonus
+		if extraCritChance ~= nil then
+			critChance = critChance + extraCritChance
+		end
+
+		-- Passives apply only to skills of their own job (spec §3.3); companions hold none today.
+		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
+			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
+			if passive ~= nil and passive.kind == "PASSIVE" and passive.job == data.job then
+				local value = passive.passiveValuePerLv[entry.level]
+				if value ~= nil then
+					if passive.passiveType == "FLAT_DAMAGE" then
+						damage = damage + value
+					elseif passive.passiveType == "CRIT_CHANCE" then
+						critChance = critChance + value
+					end
+				end
+			end
+		end
+
+		local isCritical = _UtilLogic:RandomDouble() < critChance
+		if isCritical then
+			damage = math.floor(damage * _SkillDataLogic.CRIT_MULTIPLIER)
+		end
+		return { damage = damage, isCritical = isCritical }
+	end
+
+	method boolean RollExtraAction(string ownerId)
+		-- Nimble Body roll (E8): caller must NOT re-roll for the granted extra cast.
+		local chance = 0.0
+		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
+			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
+			if passive ~= nil and passive.kind == "PASSIVE" and passive.passiveType == "EXTRA_ACTION" then
+				local value = passive.passiveValuePerLv[entry.level]
+				if value ~= nil then
+					chance = chance + value
+				end
+			end
+		end
+		if chance <= 0.0 then
+			return false
+		end
+		local granted = _UtilLogic:RandomDouble() < chance
+		if granted then
+			log("[SkillStat] extra action granted: " .. ownerId)
+		end
+		return granted
+	end
+
+end

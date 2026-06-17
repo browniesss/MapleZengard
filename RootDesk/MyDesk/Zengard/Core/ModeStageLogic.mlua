@@ -1,0 +1,367 @@
+@Logic
+script ModeStageLogic extends Logic
+
+	@Sync property string CurrentMode = ""
+
+	property table runState = {}
+
+	property string lastResult = ""
+
+	property table progressCache = {}
+
+	property table ClientProgress = {}
+
+	property any stageEndedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Settlement is event-driven (C-18): subscribe StageEndedEvent on the world bus.
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+		log("[ModeStageLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Mandatory release of the OnBeginPlay subscription.
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+			self.stageEndedHandler = nil
+		end
+	end
+
+	method table GetStageConfig(string stageId)
+		-- §4.9 contract surface; the single source is StageCatalogLogic (C-7).
+		return _StageCatalogLogic:GetStageConfig(stageId)
+	end
+
+	method string GetCurrentMode()
+		-- "" outside a run; @Sync keeps the client-side answer correct (HUD time-attack timer).
+		return self.CurrentMode
+	end
+
+	@ExecSpace("Server")
+	method void RequestEnterStage(string mode, string stageId, string jobId, string skillId)
+		-- §7.2 entry validation: unlock -> cost -> runState -> StartStage. Server-authoritative.
+		local userId = senderUserId
+		log("[ModeStageLogic] enter requested: stage=" .. stageId .. " mode=" .. mode .. " user=" .. userId)
+		if _ZengardGameLogic:IsInStage() then
+			self:Deny(userId, "ALREADY_IN_STAGE")
+			return
+		end
+		local modeCfg = _StageCatalogLogic:GetModeConfig(mode)
+		if modeCfg == nil then
+			self:Deny(userId, "INVALID_MODE")
+			return
+		end
+		local stageCfg = _StageCatalogLogic:GetStageConfig(stageId)
+		if stageCfg == nil then
+			self:Deny(userId, "INVALID_STAGE")
+			return
+		end
+		if jobId == nil or jobId == "" or skillId == nil or skillId == "" then
+			self:Deny(userId, "INVALID_LOADOUT")
+			return
+		end
+		-- Catalog-validate the loadout: once the lobby (not the server) is the job source, a desynced
+		-- list or forged request must be rejected here rather than reaching SetJob/GrantSkill with an
+		-- unknown id and failing silently mid-run. skillId must also belong to the job's initial pool.
+		if _CombatConfig:GetJobMeta(jobId) == nil or _SkillDataLogic:GetSkillData(skillId) == nil then
+			self:Deny(userId, "INVALID_LOADOUT")
+			return
+		end
+		local jobSkillOk = false
+		for _, sid in ipairs(_SkillDataLogic:GetJobInitialSkillIds(jobId)) do
+			if sid == skillId then
+				jobSkillOk = true
+				break
+			end
+		end
+		if not jobSkillOk then
+			self:Deny(userId, "INVALID_LOADOUT")
+			return
+		end
+		if not self:IsStageUnlocked(userId, stageId, mode) then
+			self:Deny(userId, "LOCKED")
+			return
+		end
+		if modeCfg.costType == "coin" then
+			if not _PlayerDataLogic:TrySpendChallengeCoin(userId, modeCfg.entryCost) then
+				self:Deny(userId, "NO_COIN")
+				return
+			end
+		else
+			if not _EnergyLogic:TryConsumeEnergy(userId, self:ResolveEnergyReason(userId, stageId)) then
+				self:Deny(userId, "NO_ENERGY")
+				return
+			end
+		end
+		local progress = self:GetProgress(userId)
+		progress.lastPlayedStageId = stageId
+		self:SaveProgress(userId)
+		self.runState = {
+			userId = userId,
+			modeId = mode,
+			stageId = stageId,
+			jobId = jobId,
+			skillId = skillId,
+			continueLeft = modeCfg.continueLimit,
+			startedAt = _UtilLogic.ServerElapsedSeconds,
+		}
+		self.lastResult = ""
+		self.CurrentMode = mode
+		_ZengardGameLogic:StartStage(userId, stageId, jobId, skillId, self.runState)
+		log("[ModeStageLogic] stage entered: stage=" .. stageId .. " mode=" .. mode)
+	end
+
+	@ExecSpace("Server")
+	method void RequestContinue()
+		-- STORY-only continue, once per run (D3). Consumes 1 energy with reason "continue" (§7.10).
+		local userId = senderUserId
+		if _ZengardGameLogic:IsInStage() or self.lastResult ~= "FAIL"
+			or self.runState.userId ~= userId or self.runState.modeId ~= "STORY"
+			or (self.runState.continueLeft or 0) < 1 then
+			self:Deny(userId, "NO_CONTINUE")
+			return
+		end
+		if not _EnergyLogic:TryConsumeEnergy(userId, "continue") then
+			self:Deny(userId, "NO_ENERGY")
+			return
+		end
+		self.runState.continueLeft = self.runState.continueLeft - 1
+		self.lastResult = ""
+		self.CurrentMode = self.runState.modeId
+		log("[ModeStageLogic] continue used: stage=" .. self.runState.stageId .. " left=" .. self.runState.continueLeft)
+		_ZengardGameLogic:ResumeStage(userId)
+	end
+
+	@ExecSpace("Server")
+	method void AbandonRun()
+		-- HUD pause/exit path: owner gives up the run -> FAIL("abandon").
+		local userId = senderUserId
+		if not _ZengardGameLogic:IsInStage() or self.runState.userId ~= userId then
+			log_warning("[ModeStageLogic] abandon rejected: user=" .. userId)
+			return
+		end
+		log("[ModeStageLogic] run abandoned: stage=" .. tostring(self.runState.stageId))
+		_ZengardGameLogic:NotifyStageFailed("abandon")
+	end
+
+	@ExecSpace("Server")
+	method void RequestProgressSync()
+		-- Client pull for StageSelect node states (unlock/clear/bestTime/lastPlayed focus, V19).
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			-- No verified caller -> encode an empty schema instead of dying on JSONEncode.
+			self:SyncStageProgress(_HttpService:JSONEncode(self:BuildPlainProgress(nil)), userId)
+			return
+		end
+		self:SyncStageProgress(_HttpService:JSONEncode(self:BuildPlainProgress(self:GetProgress(userId))), userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildPlainProgress(table progress)
+		-- Whitelist rebuild (§6 schema): JSONEncode rejects nil/function/Entity values with
+		-- LEA-3001 UnknownType, so emit only string-keyed string/number/boolean entries.
+		-- MSW JSONEncode rejects EMPTY Lua tables (cannot tell array vs object -> UnknownType),
+		-- so empty cleared/bestTime maps are omitted entirely; the client backfills them to {}.
+		local plain = {
+			v = 1,
+			lastPlayedStageId = "",
+		}
+		if progress == nil then
+			return plain
+		end
+		if type(progress.v) == "number" then
+			plain.v = progress.v
+		end
+		if type(progress.lastPlayedStageId) == "string" then
+			plain.lastPlayedStageId = progress.lastPlayedStageId
+		end
+		if type(progress.cleared) == "table" then
+			local cleared = {}
+			local hasCleared = false
+			for stageId, isCleared in pairs(progress.cleared) do
+				if type(stageId) == "string" and type(isCleared) == "boolean" then
+					cleared[stageId] = isCleared
+					hasCleared = true
+				end
+			end
+			if hasCleared then
+				plain.cleared = cleared
+			end
+		end
+		if type(progress.bestTime) == "table" then
+			local bestTime = {}
+			local hasBest = false
+			for stageId, ms in pairs(progress.bestTime) do
+				if type(stageId) == "string" and type(ms) == "number" then
+					bestTime[stageId] = ms
+					hasBest = true
+				end
+			end
+			if hasBest then
+				plain.bestTime = bestTime
+			end
+		end
+		return plain
+	end
+
+	@ExecSpace("Client")
+	method void SyncStageProgress(string progressJson)
+		-- Client mirror; Wave 3 StageSelect reads _ModeStageLogic.ClientProgress after requesting a sync.
+		local decoded = _HttpService:JSONDecode(progressJson)
+		-- cleared/bestTime are omitted from the payload when empty (server-side encode guard); backfill so readers index safely.
+		if decoded.cleared == nil then
+			decoded.cleared = {}
+		end
+		if decoded.bestTime == nil then
+			decoded.bestTime = {}
+		end
+		self.ClientProgress = decoded
+		log("[ModeStageLogic] progress synced")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Mode settlement (C-19): unlock progression, challenge coin refund, time-attack best record.
+		local userId = self.runState.userId
+		if userId == nil then
+			return
+		end
+		local stageId = self.runState.stageId
+		local mode = self.runState.modeId
+		self.lastResult = event.result
+		self.CurrentMode = ""
+		if event.result ~= "CLEAR" then
+			log("[ModeStageLogic] settled: FAIL stage=" .. tostring(stageId) .. " reason=" .. event.reason)
+			return
+		end
+		local progress = self:GetProgress(userId)
+		local wasCleared = (progress.cleared[stageId] == true)
+		progress.cleared[stageId] = true
+		local nextStageId = _StageCatalogLogic:GetNextStageId(stageId)
+		if not wasCleared and nextStageId ~= "" then
+			log("[ModeStageLogic] stage unlocked: " .. nextStageId)
+		end
+		local modeCfg = _StageCatalogLogic:GetModeConfig(mode)
+		if modeCfg ~= nil and modeCfg.refundCoinOnClear then
+			_PlayerDataLogic:AddChallengeCoin(userId, modeCfg.entryCost)
+			log("[ModeStageLogic] challenge coin refunded: user=" .. userId)
+		end
+		if modeCfg ~= nil and modeCfg.recordBestTime then
+			self:RecordBestTime(userId, stageId, event.stats)
+		end
+		_PlayerDataLogic:AddCurrency(userId, "meso", _BmBalance.MESO_STAGE_CLEAR_BONUS)
+		log("[ModeStageLogic] clear bonus meso granted: user=" .. userId .. " amount=" .. tostring(_BmBalance.MESO_STAGE_CLEAR_BONUS))
+		self:SaveProgress(userId)
+		log("[ModeStageLogic] settled: CLEAR stage=" .. stageId .. " mode=" .. tostring(mode))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RecordBestTime(string userId, string stageId, table stats)
+		-- Strictly-smaller update only (E12: ties do not refresh the record).
+		local elapsedMs = stats.elapsedMs or 0
+		local progress = self:GetProgress(userId)
+		local best = progress.bestTime[stageId]
+		if best == nil or elapsedMs < best then
+			progress.bestTime[stageId] = elapsedMs
+			log("[ModeStageLogic] best time: stage=" .. stageId .. " ms=" .. elapsedMs)
+		else
+			log("[ModeStageLogic] time attack finished: ms=" .. elapsedMs .. " best=" .. best)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsStageUnlocked(string userId, string stageId, string mode)
+		-- D8: first stage open; others need the previous stage cleared; non-STORY also needs own STORY clear.
+		local progress = self:GetProgress(userId)
+		local ids = _StageCatalogLogic:GetStageIds()
+		local unlocked = false
+		for i, id in ipairs(ids) do
+			if id == stageId then
+				unlocked = (i == 1) or (progress.cleared[ids[i - 1]] == true)
+				break
+			end
+		end
+		if mode ~= "STORY" then
+			unlocked = unlocked and (progress.cleared[stageId] == true)
+		end
+		return unlocked
+	end
+
+	@ExecSpace("ServerOnly")
+	method string ResolveEnergyReason(string userId, string stageId)
+		-- "retry" only when re-entering the same stage right after a FAIL (V14 expects all three reasons).
+		if self.lastResult == "FAIL" and self.runState.stageId == stageId and self.runState.userId == userId then
+			return "retry"
+		end
+		return "stage_start"
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetProgress(string userId)
+		-- In-memory cache over the PlayerDataLogic "progress" section (C-24: no direct DataStorage access).
+		local cached = self.progressCache[userId]
+		if cached ~= nil then
+			return cached
+		end
+		local raw = _PlayerDataLogic:GetSection(userId, "progress")
+		local data = nil
+		if raw ~= nil and raw ~= "" then
+			data = _HttpService:JSONDecode(raw)
+		end
+		if data == nil then
+			data = {}
+		end
+		local progress = {
+			v = data.v or 1,
+			cleared = data.cleared or {},
+			bestTime = data.bestTime or {},
+			lastPlayedStageId = data.lastPlayedStageId or "",
+		}
+		self.progressCache[userId] = progress
+		return progress
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveProgress(string userId)
+		-- PlayerDataLogic owns the actual flush cadence (dirty + debounce); this just hands over the section.
+		local progress = self.progressCache[userId]
+		if progress == nil then
+			return
+		end
+		-- BuildPlainProgress omits empty cleared/bestTime maps; JSONEncode rejects empty Lua tables (LEA-3001).
+		_PlayerDataLogic:SetSection(userId, "progress", _HttpService:JSONEncode(self:BuildPlainProgress(progress)))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Deny(string userId, string code)
+		-- Single deny path: server log + client feedback RPC.
+		log_warning("[ModeStageLogic] request denied: " .. code .. " user=" .. userId)
+		self:NotifyEnterDenied(code, userId)
+	end
+
+	@ExecSpace("Client")
+	method void NotifyEnterDenied(string code)
+		-- Server routes here per senderUserId (Deny), so the toast lands on the requesting client only.
+		local message = self:GetDenyMessage(code)
+		log_warning("[ModeStageLogic] denied (client): " .. code .. " - " .. message)
+		_UIToastLogic:ShowMessage(message)
+	end
+
+	method string GetDenyMessage(string code)
+		-- User-facing Korean strings for deny codes (consumed by Wave 3 UI as well).
+		local messages = {
+			ALREADY_IN_STAGE = "이미 진행 중인 게임이 있습니다",
+			INVALID_MODE = "잘못된 입장 요청입니다",
+			INVALID_STAGE = "잘못된 입장 요청입니다",
+			INVALID_LOADOUT = "직업과 스킬을 선택해 주세요",
+			LOCKED = "아직 잠긴 스테이지입니다",
+			NO_COIN = "챌린지 코인이 부족합니다",
+			NO_ENERGY = "에너지가 부족합니다",
+			NO_CONTINUE = "이어하기를 사용할 수 없습니다",
+		}
+		return messages[code] or code
+	end
+
+end

@@ -1,0 +1,177 @@
+@Logic
+script EquipmentLogic extends Logic
+
+	-- Run-scoped equipment authority (MASTER_PLAN §2.1 / §4.8, spec #6 R1~R4).
+	-- Granted cards and their stacked multipliers die with the stage (R2) and are never persisted.
+
+	property any stageStartedHandler = nil
+
+	property any stageEndedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Tracks run liveness from the bus so late grants can be rejected (spec E12).
+		self:EnsureState()
+		self.stageStartedHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+		log("[EquipmentLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Releases every handler wired in OnBeginPlay.
+		if self.stageStartedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedHandler)
+		end
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnsureState()
+		-- Lazy init keeps ServerOnly APIs safe even when called before this Logic's OnBeginPlay.
+		if self._T.granted == nil then
+			self._T.granted = {}
+		end
+		if self._T.mults == nil then
+			self._T.mults = {}
+		end
+		if self._T.drawSessions == nil then
+			self._T.drawSessions = {}
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageStarted(any event)
+		-- Param typed 'any': a typed user-event signature compiles only after the
+		-- event codeblock is registered; 'any' keeps this file build-order independent.
+		-- Grants are only legal while a run is active (E12 guard).
+		self._T.runActive = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageEnded(any event)
+		-- Param typed 'any': see OnStageStarted (build-order independence).
+		-- R2 — equipment vanishes when the stage ends, for every user in the run.
+		self._T.granted = {}
+		self._T.mults = {}
+		self._T.drawSessions = {}
+		self._T.runActive = false
+		log("[EquipmentLogic] all equipment expired (stage ended: " .. event.result .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetEquipmentAppearChance(string userId)
+		-- 0.10 base, 0.15 once the choice set is expanded (C-31).
+		if _LootLogic:IsChoiceExpanded(userId) then
+			return _EquipmentBalance.CHOICE_EQUIP_CHANCE_EXPANDED
+		end
+		return _EquipmentBalance.CHOICE_EQUIP_CHANCE_BASE
+	end
+
+	@ExecSpace("ServerOnly")
+	method string DrawEquipmentCard(string userId)
+		-- One choice set is assembled synchronously inside a single server frame, so
+		-- same-frame draws form one duplicate-avoidance session (spec §7.1); a later
+		-- frame starts a new session. Empty pool falls back to allowing duplicates (E3).
+		self:EnsureState()
+		local now = _UtilLogic.ServerElapsedSeconds
+		local session = self._T.drawSessions[userId]
+		if session == nil or session.time ~= now then
+			session = { time = now, drawnIds = {} }
+			self._T.drawSessions[userId] = session
+		end
+		local pool = {}
+		for _, card in ipairs(_EquipmentBalance:GetAllCards()) do
+			if not session.drawnIds[card.id] then
+				table.insert(pool, card.id)
+			end
+		end
+		if #pool == 0 then
+			for _, card in ipairs(_EquipmentBalance:GetAllCards()) do
+				table.insert(pool, card.id)
+			end
+		end
+		local picked = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		session.drawnIds[picked] = true
+		log("[EquipmentLogic] card drawn: user=" .. userId .. " equip=" .. picked)
+		return picked
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantEquipment(string userId, string equipId)
+		-- Stacks the card additively (spec §3.1 합연산, no slot limit) and notifies
+		-- CombatLogic to invalidate its multiplier cache (EquipmentGrantedEvent).
+		self:EnsureState()
+		if not self._T.runActive then
+			-- E12 — a grant resolving after stage end must not resurrect run state.
+			log_warning("[EquipmentLogic] grant ignored (run inactive): user=" .. userId .. " equip=" .. equipId)
+			return
+		end
+		local card = _EquipmentBalance:GetCard(equipId)
+		if card == nil then
+			log_warning("[EquipmentLogic] grant ignored (unknown equip): " .. equipId)
+			return
+		end
+		local list = self._T.granted[userId]
+		if list == nil then
+			list = {}
+			self._T.granted[userId] = list
+		end
+		table.insert(list, equipId)
+		local mults = self._T.mults[userId]
+		if mults == nil then
+			mults = self:NewMultiplierTable()
+			self._T.mults[userId] = mults
+		end
+		for statKey, value in pairs(card.stats) do
+			mults[statKey] = mults[statKey] + value
+		end
+		local ev = EquipmentGrantedEvent()
+		ev.userId = userId
+		ev.equipId = equipId
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[EquipmentLogic] equipment granted: user=" .. userId .. " equip=" .. equipId .. " owned=" .. tostring(#list))
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetEquipStatMultipliers(string userId)
+		-- Returns a defensive copy with the full 8-key schema (MASTER_PLAN §4.8);
+		-- callers read keys without nil checks and must not mutate internal state.
+		self:EnsureState()
+		local result = self:NewMultiplierTable()
+		local mults = self._T.mults[userId]
+		if mults ~= nil then
+			for statKey, value in pairs(mults) do
+				result[statKey] = value
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearRunState(string userId)
+		-- Called by ZengardGameLogic.StartStage step 6 (§1.1) for a fresh run.
+		self:EnsureState()
+		self._T.granted[userId] = nil
+		self._T.mults[userId] = nil
+		self._T.drawSessions[userId] = nil
+		log("[EquipmentLogic] run state cleared: user=" .. userId)
+	end
+
+	method table NewMultiplierTable()
+		-- Full key schema of GetEquipStatMultipliers (§4.8) initialized to zero.
+		return {
+			atkMul = 0,
+			atkSpeedMul = 0,
+			skillDmgMul = 0,
+			critChanceAdd = 0,
+			rangeAdd = 0,
+			targetAdd = 0,
+			expGainMul = 0,
+			lootDropAdd = 0,
+		}
+	end
+
+end

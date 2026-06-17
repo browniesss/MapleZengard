@@ -1,0 +1,82 @@
+@Component
+script CompanionComponent extends Component
+
+	@Sync
+	property string CompanionId = ""
+
+	@Sync
+	property string SecondJob = ""
+
+	-- AvatarRendererComponent.OrderInLayer is not engine-synced, so the depth value travels via @Sync instead.
+	@Sync
+	property integer RenderOrder = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Applies the depth already present at creation; later changes arrive through OnSyncProperty.
+		log("[CompanionComponent] OnBeginPlay (client): " .. self.CompanionId)
+		self:ApplyRenderOrder()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Setup(string companionId, string secondJob)
+		-- One-shot server setup: identity + costume. Costume slots are @Sync engine properties, so server writes reach every client.
+		self.CompanionId = companionId
+		self.SecondJob = secondJob
+		local costume = self.Entity.CostumeManagerComponent
+		if isvalid(costume) then
+			costume.UseCustomEquipOnly = true
+			local weapon = _CompanionConfig:GetWeaponEquip(secondJob)
+			if weapon ~= nil and weapon.ruid ~= "" then
+				if weapon.slot == "ONE_HANDED" then
+					costume.CustomOneHandedWeaponEquip = weapon.ruid
+				elseif weapon.slot == "TWO_HANDED" then
+					costume.CustomTwoHandedWeaponEquip = weapon.ruid
+				end
+			else
+				-- E10 fallback: default avatar without a weapon until the RUID is filled in.
+				log_warning("[CompanionComponent] weapon RUID missing for " .. secondJob)
+			end
+		else
+			log_warning("[CompanionComponent] CostumeManagerComponent missing on " .. companionId)
+		end
+		log("[CompanionComponent] setup: " .. companionId .. " (" .. secondJob .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetBoardPosition(Vector3 worldPos, integer renderOrder)
+		-- Direct Transform write is the contract-allowed move here: companions carry no Body component (D2).
+		local transform = self.Entity.TransformComponent
+		if isvalid(transform) then
+			transform.WorldPosition = worldPos
+		end
+		self.RenderOrder = renderOrder
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- Mirrors synced depth into the renderer on each client.
+		if name == "RenderOrder" then
+			self:ApplyRenderOrder()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyRenderOrder()
+		-- §5.1 pseudo-depth: lower board rows render in front (value computed server-side via BoardConfig).
+		local renderer = self.Entity.AvatarRendererComponent
+		if isvalid(renderer) then
+			renderer.OrderInLayer = self.RenderOrder
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAttackMotion()
+		-- Avatar ATTACK action playback on every client; the motion itself resolves from the equipped weapon (D2).
+		local actionEvent = BodyActionStateChangeEvent()
+		actionEvent.ActionState = MapleAvatarBodyActionState.Attack
+		actionEvent.needResetAction = true
+		self.Entity:SendEvent(actionEvent)
+	end
+
+end

@@ -1,0 +1,216 @@
+@Logic
+script UISkillHudLogic extends Logic
+
+	-- Entity refs injected by UIBuilder bind (C-21) — ui/SkillHUD.ui
+	property Entity rootGroup = "3b17d761-1ece-4c13-b07c-6f977bc175da"
+
+	property Entity slot1 = "f9149b08-5a87-4a58-b7d8-9e12181e305b"
+
+	property Entity slot2 = "766d7597-7e77-4fd6-add6-d6fabd48cb3d"
+
+	property Entity slot3 = "b2fcd20e-7cff-4785-961b-dc17e1de24fe"
+
+	property Entity slot4 = "22fe9742-4727-4e1f-8434-bb9cf81cca11"
+
+	property Entity slot5 = "42aa8e07-db21-4388-b7ea-e80d28e4d868"
+
+	property Entity slot6 = "46692853-29e9-4347-b053-0eed8c6baf71"
+
+	property Entity slot7 = "6dd81806-bf29-4a90-b92e-ee1740b82c63"
+
+	property Entity slot8 = "399b86fc-54d2-47e0-927a-6929f7694841"
+
+	property any slots = nil
+
+	-- Last SyncSkillState snapshot reference (a fresh table per push) — reference change = new data.
+	property any lastState = nil
+
+	-- Slot refs are gathered in TryWire because client UI entities aren't valid in OnBeginPlay.
+	property boolean wired = false
+
+	property table busHandlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Subscribes stage/fusion bus events and asks for the first sync; slot wiring waits for TryWire.
+		self.slots = {}
+		self:Subscribe(StageStartedEvent, self.OnStageStarted)
+		self:Subscribe(StageEndedEvent, self.OnStageEnded)
+		self:Subscribe(FusionActivatedEvent, self.OnFusionActivated)
+		self:Subscribe(SkillFusedEvent, self.OnSkillFused)
+		_SkillInventoryLogic:RequestSyncSkillState()
+		log("[UISkillHud] OnBeginPlay")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- One-shot slot collection once all 8 slot entities are valid; false retries next frame.
+		local refs = { self.slot1, self.slot2, self.slot3, self.slot4, self.slot5, self.slot6, self.slot7, self.slot8 }
+		for i = 1, #refs do
+			if not isvalid(refs[i]) then
+				return false
+			end
+		end
+		self.slots = refs
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		log("[UISkillHud] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Releases every bus subscription taken in OnBeginPlay.
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(any eventType, any callback)
+		-- Tracks a game-bus subscription so OnEndPlay can disconnect it.
+		local evHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
+		table.insert(self.busHandlers, { evType = eventType, evHandler = evHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- SyncSkillState stores a fresh table in SkillInventoryLogic.clientSkillState; polling the
+		-- reference avoids coupling Wave-1 server code to this HUD.
+		if not self.wired then
+			if not self:TryWire() then
+				return
+			end
+			self.wired = true
+		end
+		local state = _SkillInventoryLogic.clientSkillState
+		if state == self.lastState then
+			return
+		end
+		self.lastState = state
+		self:Refresh(state)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageStarted(StageStartedEvent event)
+		-- Skill HUD lives only inside a run (§5.2 DefaultShow=false).
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = true
+		end
+		_SkillInventoryLogic:RequestSyncSkillState()
+		log("[UISkillHud] shown for stage " .. event.stageId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Run teardown: hide and forget the snapshot so the next run starts clean.
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		self.lastState = nil
+		self:ClearSlots()
+		log("[UISkillHud] hidden (stage " .. event.result .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnFusionActivated(FusionActivatedEvent event)
+		-- Badge data rides the next SyncSkillState push; this is the verify-phase checkpoint only.
+		log("[UISkillHud] fusion badge active: " .. event.recipeId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkillFused(SkillFusedEvent event)
+		-- Slot contents update via the push triggered by the fusion's grant/removes.
+		log("[UISkillHud] fusion completed: " .. event.recipeId .. " -> " .. event.resultSkillId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh(any state)
+		-- Renders owned skills into the 8 slots and marks fusion-material slots with the badge.
+		if state == nil then
+			self:ClearSlots()
+			return
+		end
+		if state.ownerId ~= self:GetLocalUserId() then
+			return
+		end
+		local materialSet = {}
+		local activated = state.activatedRecipes or {}
+		for _, recipeId in ipairs(activated) do
+			local recipe = _SkillDataLogic:GetRecipe(recipeId)
+			if recipe ~= nil then
+				materialSet[recipe.materialA] = true
+				materialSet[recipe.materialB] = true
+			end
+		end
+		local owned = state.skills or {}
+		for i = 1, #self.slots do
+			local rec = owned[i]
+			if rec ~= nil then
+				local data = _SkillDataLogic:GetSkillData(rec.skillId)
+				local label = rec.skillId
+				if data ~= nil then
+					label = data.displayName
+				end
+				self:SetSlot(i, label, "Lv." .. tostring(rec.level), materialSet[rec.skillId] == true)
+			else
+				self:SetSlot(i, "", "", false)
+			end
+		end
+		log("[UISkillHud] skill hud refreshed: " .. tostring(#owned) .. " skills")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetSlot(integer slotIndex, string label, string levelLabel, boolean showBadge)
+		-- Single write point for one slot's name / level / fusion badge.
+		local slotEntity = self.slots[slotIndex]
+		if not isvalid(slotEntity) then
+			return
+		end
+		-- An empty slot is hidden entirely rather than shown as a dim frame: a faint frame
+		-- on a light slot sprite still read as an unfinished white box (defect A). The skill
+		-- HUD grows as skills are acquired, so only filled slots render.
+		local filled = label ~= ""
+		slotEntity.Enable = filled
+		if not filled then
+			return
+		end
+		local frame = slotEntity.SpriteGUIRendererComponent
+		if isvalid(frame) then
+			frame:SetAlpha(1.0)
+		end
+		local nameText = slotEntity:GetChildByName("NameText", false)
+		if isvalid(nameText) then
+			nameText.TextComponent.Text = label
+		end
+		local levelText = slotEntity:GetChildByName("LevelText", false)
+		if isvalid(levelText) then
+			levelText.TextComponent.Text = levelLabel
+		end
+		local badge = slotEntity:GetChildByName("Badge", false)
+		if isvalid(badge) then
+			badge.Enable = showBadge
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearSlots()
+		-- Empties all 8 slots (run end / nil snapshot).
+		for i = 1, #self.slots do
+			self:SetSlot(i, "", "", false)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetLocalUserId()
+		-- LocalPlayer is client-only and may be invalid during the first frames.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			return ""
+		end
+		return player.PlayerComponent.UserId
+	end
+
+end

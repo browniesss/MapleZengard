@@ -1,0 +1,442 @@
+@Logic
+script CompanionLogic extends Logic
+
+	-- companionId → { companionId, ownerUserId, jobGroup, secondJob, direction, col, row, placed, unitEntity }
+	property table roster = {}
+
+	property integer companionSeq = 0
+
+	property string currentStageId = ""
+
+	property boolean triggerConsumed = false
+
+	property string pendingChoiceToken = ""
+
+	property any boardMapEntity = nil
+
+	property any stageStartedHandler = nil
+
+	property any stageEndedHandler = nil
+
+	property any jobAdvancedHandler = nil
+
+	property any levelUpHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Subscribes the run-scoped triggers on the single game-event bus (§3); boss-zen trigger arrives as a direct call instead (C-20).
+		log("[CompanionLogic] OnBeginPlay")
+		self.stageStartedHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
+		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
+		self.jobAdvancedHandler = _ZengardGameLogic:ConnectEvent(JobAdvancedEvent, self.OnJobAdvanced)
+		self.levelUpHandler = _ZengardGameLogic:ConnectEvent(LevelUpEvent, self.OnLevelUp)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Releases bus subscriptions at world session end.
+		if self.stageStartedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedHandler)
+			self.stageStartedHandler = nil
+		end
+		if self.stageEndedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(StageEndedEvent, self.stageEndedHandler)
+			self.stageEndedHandler = nil
+		end
+		if self.jobAdvancedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(JobAdvancedEvent, self.jobAdvancedHandler)
+			self.jobAdvancedHandler = nil
+		end
+		if self.levelUpHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(LevelUpEvent, self.levelUpHandler)
+			self.levelUpHandler = nil
+		end
+	end
+
+	method string GetStageCompanionNotice(string stageId)
+		-- R1: pre-entry notice for the stage-select screen; empty string when the stage has no companion trigger.
+		local trigger = _CompanionConfig:GetStageTrigger(stageId)
+		if trigger == nil then
+			return ""
+		end
+		return trigger.noticeText
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageStarted(any event)
+		-- Arms the per-stage trigger. ResetRun (§1.1-7) already ran before this event is emitted (§1.1-11).
+		self.currentStageId = event.stageId
+		self.triggerConsumed = false
+		log("[CompanionLogic] stage trigger armed: " .. event.stageId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnStageEnded(any event)
+		-- D11/E5: companions never outlive the run; any open join choice token dies with it.
+		self:ResetRun()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnJobAdvanced(JobAdvancedEvent event)
+		-- AFTER_JOB_ADV trigger path (R2); consumed-once guard lives in EvaluateTrigger.
+		self:EvaluateTrigger("AFTER_JOB_ADV")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLevelUp(LevelUpEvent event)
+		-- D7 sync point: refresh roster skill snapshots after a level-up choice window may have changed companion skills.
+		for companionId, record in pairs(self.roster) do
+			record.skillIds = self:GetOwnedSkillIds(companionId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossZenImminent(integer zenIndex)
+		-- Called by WaveLogic right before boss spawn (§1.2-3, C-20) so the join choice precedes the boss.
+		log("[CompanionLogic] boss zen imminent: zen " .. tostring(zenIndex))
+		self:EvaluateTrigger("BEFORE_NAMED_BOSS")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EvaluateTrigger(string triggerType)
+		-- Fires the stage's companion trigger at most once per run (D9).
+		local trigger = _CompanionConfig:GetStageTrigger(self.currentStageId)
+		if trigger == nil or trigger.triggerType ~= triggerType or self.triggerConsumed then
+			return
+		end
+		self.triggerConsumed = true
+		if self:GetCompanionCount() >= _CompanionConfig.MAX_COMPANIONS then
+			-- E3: slots full → trigger is consumed without a choice popup.
+			log_warning("[CompanionLogic] companion slots full, trigger skipped")
+			return
+		end
+		local cards = self:BuildJobGroupCards()
+		self.pendingChoiceToken = "companion_" .. _UtilLogic:NewGuid()
+		_GrowthLogic:EnqueueSpecialChoiceSet(cards, "CompanionLogic", self.pendingChoiceToken)
+		log("[CompanionLogic] companion join choice offered (" .. triggerType .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildJobGroupCards()
+		-- D3: 3 of the 4 job groups, uniform without replacement (Fisher-Yates prefix).
+		local pool = _CompanionConfig:GetJobGroups()
+		for i = #pool, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			pool[i], pool[j] = pool[j], pool[i]
+		end
+		local cards = {}
+		for i = 1, _CompanionConfig.JOB_GROUP_CARD_COUNT do
+			local jobGroup = pool[i]
+			table.insert(cards, {
+				choiceId = jobGroup,
+				kind = "COMPANION_JOB",
+				name = _CompanionConfig:GetJobGroupDisplayName(jobGroup) .. " 동료",
+				desc = "2차 전직 기준으로 " .. _CompanionConfig:GetJobGroupDisplayName(jobGroup) .. " 동료가 랜덤 합류합니다.",
+				iconRuid = "",
+				grade = "EPIC",
+			})
+		end
+		return cards
+	end
+
+	@ExecSpace("Server")
+	method void ResolveJobGroupChoice(string choiceToken, string jobGroup)
+		-- Resolver callback for the COMPANION_JOB special choice set (C-2); token guard rejects stale/forged calls.
+		if choiceToken == "" or choiceToken ~= self.pendingChoiceToken then
+			log_warning("[CompanionLogic] stale companion choice token ignored")
+			return
+		end
+		self.pendingChoiceToken = ""
+		if self:GetCompanionCount() >= _CompanionConfig.MAX_COMPANIONS then
+			log_warning("[CompanionLogic] companion slots full at resolve time")
+			return
+		end
+		local secondJobPool = _CompanionConfig:GetSecondJobPool(jobGroup)
+		if secondJobPool == nil or #secondJobPool == 0 then
+			log_warning("[CompanionLogic] unknown job group: " .. tostring(jobGroup))
+			return
+		end
+		local secondJob = secondJobPool[_UtilLogic:RandomIntegerRange(1, #secondJobPool)]
+		local skillPool = _CompanionConfig:GetInitialSkillPool(secondJob)
+		if skillPool == nil or #skillPool == 0 then
+			log_warning("[CompanionLogic] no initial skill pool for: " .. tostring(secondJob))
+			return
+		end
+		local initialSkillId = skillPool[_UtilLogic:RandomIntegerRange(1, #skillPool)]
+		self:SpawnCompanion(jobGroup, secondJob, initialSkillId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnCompanion(string jobGroup, string secondJob, string initialSkillId)
+		-- Join pipeline: cell claim → spawn → costume/skill/combat registration → CompanionJoinedEvent.
+		local map = self:GetBoardMap()
+		if map == nil then
+			log_error("[CompanionLogic] cannot spawn companion: board map entity not found")
+			return
+		end
+		self.companionSeq += 1
+		local companionId = "companion_" .. tostring(self.companionSeq)
+
+		local col = nil
+		local row = nil
+		local cells = _BoardLogic:GetRandomEmptyCells(1)
+		if cells ~= nil and #cells >= 1 then
+			if _BoardLogic:TryOccupy(cells[1].col, cells[1].row, companionId, "companion") then
+				col = cells[1].col
+				row = cells[1].row
+			end
+		end
+
+		local spawnPos = _CompanionConfig.OFFBOARD_POSITION
+		if col ~= nil then
+			spawnPos = _BoardLogic:CellToWorld(col, row)
+		end
+		local unitEntity = _SpawnService:SpawnByModelId(_CompanionConfig.COMPANION_MODEL_ID, companionId, spawnPos, map)
+		if not isvalid(unitEntity) then
+			if col ~= nil then
+				_BoardLogic:Release(col, row, companionId)
+			end
+			log_error("[CompanionLogic] spawn failed for model: " .. _CompanionConfig.COMPANION_MODEL_ID)
+			return
+		end
+
+		---@type CompanionComponent
+		local unit = unitEntity:GetComponent("script.CompanionComponent")
+		if isvalid(unit) then
+			unit:Setup(companionId, secondJob)
+			if col ~= nil then
+				unit:SetBoardPosition(spawnPos, _BoardConfig:GetOrderInLayer(row))
+			end
+		else
+			log_warning("[CompanionLogic] CompanionComponent missing on spawned entity: " .. companionId)
+		end
+
+		self.roster[companionId] = {
+			companionId = companionId,
+			ownerUserId = self:ResolveOwnerUserId(),
+			jobGroup = jobGroup,
+			secondJob = secondJob,
+			direction = _CompanionConfig.DEFAULT_DIRECTION,
+			skillIds = { initialSkillId },
+			col = col,
+			row = row,
+			placed = col ~= nil,
+			unitEntity = unitEntity,
+		}
+
+		-- C-13: companions own no attack timer — combat runs inside the zen sequence keyed by companionId.
+		_SkillInventoryLogic:GrantSkill(companionId, initialSkillId)
+		_CombatLogic:RegisterCombatUnit(unitEntity, companionId)
+		_CombatLogic:RequestSetCombatConfig(companionId, "MANUAL", _CompanionConfig.DEFAULT_DIRECTION, _SkillInventoryLogic:GetSkillOrder(companionId), "")
+
+		local joinedEvent = CompanionJoinedEvent()
+		joinedEvent.companionId = companionId
+		joinedEvent.jobGroup = jobGroup
+		joinedEvent.secondJob = secondJob
+		joinedEvent.initialSkillId = initialSkillId
+		_ZengardGameLogic:SendGameEvent(joinedEvent)
+		log("companion joined: " .. secondJob)
+		if col == nil then
+			-- E1: join still succeeds with placement deferred to the next zen's RepositionAll.
+			log_warning("[CompanionLogic] board full, placement deferred: " .. companionId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RepositionAll()
+		-- Called by WaveLogic every zen (§1.2-4); companionId ascending keeps multi-companion runs deterministic (C-13).
+		local companionIds = {}
+		for companionId, _record in pairs(self.roster) do
+			table.insert(companionIds, companionId)
+		end
+		table.sort(companionIds)
+		for _, companionId in ipairs(companionIds) do
+			local record = self.roster[companionId]
+			if record.placed and record.col ~= nil then
+				_BoardLogic:Release(record.col, record.row, companionId)
+				record.col = nil
+				record.row = nil
+				record.placed = false
+			end
+			---@type CompanionComponent
+			local unit = nil
+			if isvalid(record.unitEntity) then
+				unit = record.unitEntity:GetComponent("script.CompanionComponent")
+			end
+			local cells = _BoardLogic:GetRandomEmptyCells(1)
+			if cells ~= nil and #cells >= 1 and _BoardLogic:TryOccupy(cells[1].col, cells[1].row, companionId, "companion") then
+				record.col = cells[1].col
+				record.row = cells[1].row
+				record.placed = true
+				if isvalid(unit) then
+					unit:SetBoardPosition(_BoardLogic:CellToWorld(record.col, record.row), _BoardConfig:GetOrderInLayer(record.row))
+				end
+				log("[CompanionLogic] companion repositioned: " .. companionId .. " -> " .. tostring(record.col) .. "," .. tostring(record.row))
+			else
+				-- E1: no empty cell — sit out this zen offboard and retry next zen.
+				if isvalid(unit) then
+					unit:SetBoardPosition(_CompanionConfig.OFFBOARD_POSITION, 0)
+				end
+				log_warning("[CompanionLogic] no empty cell, companion placement deferred: " .. companionId)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetRun()
+		-- §1.1-7 + D11: full run teardown — cells, combat registration, companion skill state, entities, open choice token.
+		self.pendingChoiceToken = ""
+		self.triggerConsumed = false
+		for companionId, record in pairs(self.roster) do
+			if record.placed and record.col ~= nil then
+				_BoardLogic:Release(record.col, record.row, companionId)
+			end
+			_CombatLogic:UnregisterCombatUnit(companionId)
+			_SkillInventoryLogic:ResetUser(companionId)
+			if isvalid(record.unitEntity) then
+				record.unitEntity:Destroy()
+			end
+		end
+		self.roster = {}
+		log("[CompanionLogic] companion run reset")
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetDirection(string companionId, string direction)
+		-- R8: player-designated attack direction; ownership enforced via senderUserId (E7).
+		local record = self:GetOwnedCompanion(companionId, senderUserId)
+		if record == nil then
+			return
+		end
+		if not self:IsValidDirection(direction) then
+			log_warning("[CompanionLogic] invalid direction ignored: " .. tostring(direction))
+			return
+		end
+		record.direction = direction
+		-- Direction lives in CombatLogic's per-unit config — forwarded through its single entry point (C-11).
+		_CombatLogic:RequestSetCombatConfig(companionId, "MANUAL", direction, _SkillInventoryLogic:GetSkillOrder(companionId), "")
+		self:NotifyOrderChanged(record)
+		log("[CompanionLogic] companion direction set: " .. companionId .. " -> " .. direction)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetSkillOrder(string companionId, table skillIds)
+		-- R9: player-designated cast order; SkillInventoryLogic validates ids and appends omitted actives (E6).
+		local record = self:GetOwnedCompanion(companionId, senderUserId)
+		if record == nil then
+			return
+		end
+		if skillIds == nil or #skillIds == 0 then
+			-- E6: empty payload keeps the existing order.
+			return
+		end
+		_SkillInventoryLogic:SetSkillOrder(companionId, skillIds)
+		record.skillIds = self:GetOwnedSkillIds(companionId)
+		self:NotifyOrderChanged(record)
+		log("[CompanionLogic] companion skill order set: " .. companionId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void NotifyOrderChanged(table record)
+		-- Pushes the current direction + cast order to the panel HUD via the bus (§3).
+		local orderEvent = CompanionOrderChangedEvent()
+		orderEvent.companionId = record.companionId
+		orderEvent.direction = record.direction
+		orderEvent.skillIds = _SkillInventoryLogic:GetSkillOrder(record.companionId)
+		_ZengardGameLogic:SendGameEvent(orderEvent)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetOwnedCompanion(string companionId, string requesterUserId)
+		-- E7: rejects unknown companions and requests from non-owners.
+		local record = self.roster[companionId]
+		if record == nil then
+			log_warning("[CompanionLogic] unknown companion: " .. tostring(companionId))
+			return nil
+		end
+		if requesterUserId == nil or requesterUserId ~= record.ownerUserId then
+			log_warning("[CompanionLogic] companion request denied (owner mismatch): " .. companionId)
+			return nil
+		end
+		return record
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsValidDirection(string direction)
+		-- Direction vocabulary from RequestSetCombatConfig (§4.4).
+		return direction == "UP" or direction == "DOWN" or direction == "LEFT" or direction == "RIGHT" or direction == "RANDOM"
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetCompanionCount()
+		-- Live roster size (D1 cap checks).
+		local count = 0
+		for _companionId, _record in pairs(self.roster) do
+			count += 1
+		end
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetActiveCompanions()
+		-- Roster snapshot for the shared level-up choice pool (p.15 companion skill growth):
+		-- {{companionId, baseJob, displayLabel}, ...}, companionId-ascending for deterministic ordering.
+		local companionIds = {}
+		for companionId, _record in pairs(self.roster) do
+			table.insert(companionIds, companionId)
+		end
+		table.sort(companionIds)
+		local result = {}
+		for _, companionId in ipairs(companionIds) do
+			local record = self.roster[companionId]
+			table.insert(result, {
+				companionId = companionId,
+				baseJob = self:JobGroupToBaseJob(record.jobGroup),
+				displayLabel = _CompanionConfig:GetSecondJobDisplayName(record.secondJob),
+			})
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method string JobGroupToBaseJob(string jobGroup)
+		-- Maps the companion job group to the base job key used by SkillDataLogic pools (§7.4).
+		local map = { WARRIOR = "warrior", MAGICIAN = "mage", ARCHER = "archer", THIEF = "thief" }
+		return map[jobGroup] or ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetOwnedSkillIds(string companionId)
+		-- Snapshot of owned skill ids in grant order, from the single skill-state source (§4.5).
+		local skillIds = {}
+		for _, owned in ipairs(_SkillInventoryLogic:GetOwnedSkills(companionId)) do
+			table.insert(skillIds, owned.skillId)
+		end
+		return skillIds
+	end
+
+	@ExecSpace("ServerOnly")
+	method string ResolveOwnerUserId()
+		-- Prototype is single-user: the first connected user owns every companion.
+		local userIds = _UserService.UserEntities.Keys
+		if userIds ~= nil and #userIds >= 1 then
+			return userIds[1]
+		end
+		log_warning("[CompanionLogic] no connected user found for companion ownership")
+		return ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetBoardMap()
+		-- Spawn parent must never be nil (§4 common rule); path constant is BoardConfig-owned.
+		if isvalid(self.boardMapEntity) then
+			return self.boardMapEntity
+		end
+		self.boardMapEntity = _EntityService:GetEntityByPath(_BoardConfig.MAP_ENTITY_PATH)
+		if self.boardMapEntity == nil then
+			log_error("[CompanionLogic] board map entity not found: " .. _BoardConfig.MAP_ENTITY_PATH)
+		end
+		return self.boardMapEntity
+	end
+
+end

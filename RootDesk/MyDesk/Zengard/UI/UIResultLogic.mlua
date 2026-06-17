@@ -1,0 +1,596 @@
+@Logic
+script UIResultLogic extends Logic
+
+	-- UI entity bindings injected by UIBuilder write(bind) — C-21: no script component inside .ui.
+	property Entity groupRoot = "6a6aeae4-2eb4-4928-9a9b-23582f652978"
+
+	property Entity titleText = "d7ad0031-c0bb-4a0d-982f-02bb931df70d"
+
+	property Entity subText = "db0ac89d-344a-4579-9c36-023558118bf1"
+
+	property Entity reasonText = "8e8cb67d-8655-4d8a-b420-85121f6b8b0d"
+
+	property Entity statsText = "6b326a67-696e-426f-9013-83a0a9412f50"
+
+	property Entity timeText = "5439bd88-542f-4880-8680-c63d7aec4dd7"
+
+	property Entity recordBadge = "904e87cd-6d48-4483-96e2-17feab560a83"
+
+	property Entity btnContinue = "0186dc17-9fab-4c6a-b14f-5b260406b4a8"
+
+	property Entity btnRetry = "7fef9a64-d0f1-4347-980f-bd8f022fefcf"
+
+	property Entity btnNext = "b89cc6ad-eee1-4dab-8536-026c075fc505"
+
+	property Entity btnLobby = "e8e96546-af8a-4e60-aa8f-18c4c4f9aa05"
+
+	property string lastStageId = ""
+
+	property string lastMode = ""
+
+	property boolean resultOpen = false
+
+	property string cachedJobId = ""
+
+	property string cachedSkillId = ""
+
+	property boolean continuePending = false
+
+	property boolean continueUsed = false
+
+	-- Close-on-success flag: retry/next/continue request an async server entry and must NOT close the
+	-- result popup synchronously. A server deny (no energy / locked / already-in-stage) never relays
+	-- StageStartedEvent, so a synchronous CloseResult would strand the player on the stale board GameHud.
+	-- The popup is closed only when the success signal (OnStageStarted) arrives; on deny it stays open
+	-- and the server's NotifyEnterDenied toast already shows the reason.
+	property boolean pendingClose = false
+
+	-- Failsafe so a denied/dropped request does not latch the buttons forever: if no StageStarted lands
+	-- within the grace window, pendingClose is released and the popup buttons become usable again.
+	property integer pendingCloseTimerId = 0
+
+	property table uiHandlers = {}
+
+	property table busHandlers = {}
+
+	property boolean wired = false
+
+	property table wiredBtns = {}
+
+	-- ui-sound.md project-default SFX RUIDs.
+	property string clickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property number clickSoundVolume = 1.0
+
+	property number hoverSoundVolume = 0.6
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Controller @Logic lives outside the DefaultShow=false group so its lifecycle always runs (C-21).
+		-- Server-bus subscriptions are safe here; button wiring is deferred to TryWire (the result-popup
+		-- child entities are not instantiated until the group is first Enabled in ShowResult).
+		self:SubscribeBus(StageStartedEvent, self.OnStageStarted)
+		self:SubscribeBus(StageEndedEvent, self.OnStageEnded)
+		self:SubscribeBus(JobSelectedEvent, self.OnJobSelected)
+		log("[UIResultLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number dt)
+		-- Deferred wiring: result-button child entities become valid only after the group is first
+		-- Enabled. ShowResult hides some buttons (Enable=false) before enabling the group, so buttons
+		-- can never be all-valid in one frame — each is wired independently the first frame it is valid.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+				log("[UIResultLogic] wired")
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- Wire each button at most once, gated only on its own validity; returns true once all four done.
+		local done = true
+		done = self:WireOnce("continue", self.btnContinue, function() self:OnContinueClicked() end) and done
+		done = self:WireOnce("retry", self.btnRetry, function() self:OnRetryClicked() end) and done
+		done = self:WireOnce("next", self.btnNext, function() self:OnNextClicked() end) and done
+		done = self:WireOnce("lobby", self.btnLobby, function() self:OnLobbyClicked() end) and done
+		return done
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean WireOnce(string key, Entity btn, any onClick)
+		-- Idempotent per-button wiring: connects the first time btn is valid, then reports wired thereafter.
+		if self.wiredBtns[key] then
+			return true
+		end
+		if not isvalid(btn) then
+			return false
+		end
+		self:WireButton(btn, onClick)
+		self.wiredBtns[key] = true
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Everything connected in OnBeginPlay must be released here.
+		for _, rec in ipairs(self.uiHandlers) do
+			if isvalid(rec.entity) then
+				rec.entity:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.uiHandlers = {}
+		for _, rec in ipairs(self.busHandlers) do
+			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+		end
+		self.busHandlers = {}
+		-- Release the pending-close failsafe timer (mandatory timer cleanup).
+		self:ClearPendingCloseTimer()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SubscribeBus(any evType, any callback)
+		-- Tracked so OnEndPlay can release every bus subscription.
+		local h = _ZengardGameLogic:ConnectEvent(evType, callback)
+		table.insert(self.busHandlers, { evType = evType, evHandler = h })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity btn, any onClick)
+		-- Click + hover SFX wiring uses the project-default UI RUIDs (ui-sound.md).
+		if not isvalid(btn) then
+			return
+		end
+		local clickH = btn:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSoundRuid, self.clickSoundVolume)
+			onClick()
+		end)
+		table.insert(self.uiHandlers, { entity = btn, evType = ButtonClickEvent, evHandler = clickH })
+		local hoverH = btn:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSoundRuid, self.hoverSoundVolume)
+		end)
+		table.insert(self.uiHandlers, { entity = btn, evType = UITouchEnterEvent, evHandler = hoverH })
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetLocalUserId()
+		-- LocalPlayer can be nil during early client init, so resolve lazily per call.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.PlayerComponent) then
+			return ""
+		end
+		return player.PlayerComponent.UserId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnJobSelected(JobSelectedEvent event)
+		-- Loadout cache for retry/next-stage re-entry; only the local player's pick matters.
+		if event.userId ~= self:GetLocalUserId() then
+			return
+		end
+		self.cachedJobId = event.jobId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ArmPendingClose()
+		-- Shared by retry/next/continue: defer the close to the StageStarted success signal instead of
+		-- closing synchronously (server deny never relays StageStarted). The failsafe releases the flag so
+		-- a denied request cannot latch the buttons; cancel any prior arm first to avoid a stale release.
+		self.pendingClose = true
+		if self.pendingCloseTimerId ~= 0 then
+			_TimerService:ClearTimer(self.pendingCloseTimerId)
+			self.pendingCloseTimerId = 0
+		end
+		self.pendingCloseTimerId = _TimerService:SetTimerOnce(function()
+			self.pendingCloseTimerId = 0
+			if self.pendingClose then
+				self.pendingClose = false
+				log("[UIResultLogic] pendingClose released (no StageStarted within grace)")
+			end
+		end, 1.8)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearPendingCloseTimer()
+		-- Cancels the failsafe once the success signal arrives (or the popup closes for any reason).
+		if self.pendingCloseTimerId ~= 0 then
+			_TimerService:ClearTimer(self.pendingCloseTimerId)
+			self.pendingCloseTimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsEntryInFlight()
+		-- Re-entry guard for retry/next/continue. While a deferred close is armed, a request has been
+		-- sent and we are waiting for StageStarted (success) or the grace timer (deny). The buttons stay
+		-- visible (deny=popup-stays-open is preserved), but a second tap in that window would fire a
+		-- duplicate RequestEnterStage/RequestContinue, so drop it. The flag is released by OnStageStarted
+		-- or the ArmPendingClose failsafe, after which taps work again.
+		return self.pendingClose
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageStarted(StageStartedEvent event)
+		-- A StageStarted right after our continue request means the continue was consumed (E6:
+		-- the button must stay hidden on the next fail). Fresh entries reset the flag.
+		if self.continuePending then
+			self.continueUsed = true
+		else
+			self.continueUsed = false
+		end
+		self.continuePending = false
+		self.lastStageId = event.stageId
+		self.lastMode = event.mode
+		-- StageStarted is the server's success signal (fired only after StartStage passes every guard).
+		-- If a retry/next/continue is awaiting close, route through CloseResult so the modal occlusion
+		-- refcount is repaid consistently; otherwise (fresh entry / no popup) just force the group off.
+		self:ClearPendingCloseTimer()
+		local hadPendingClose = self.pendingClose
+		self.pendingClose = false
+		if hadPendingClose and self.resultOpen then
+			self:CloseResult()
+		else
+			self.resultOpen = false
+			if isvalid(self.groupRoot) then
+				self.groupRoot.Enable = false
+			end
+		end
+		-- GrantSkill's client push (§1.1-9) lands before this relayed event, so order[1] is the
+		-- stage-select pick; the job-pool fallback covers a missed push.
+		local snap = _SkillInventoryLogic.clientSkillState
+		if snap ~= nil and snap.order ~= nil and #snap.order > 0 then
+			self.cachedSkillId = snap.order[1]
+		end
+		-- Pre-run best time snapshot: compared at clear time for the NEW RECORD badge.
+		_ModeStageLogic:RequestProgressSync()
+		log("[UIResultLogic] stage start noted: " .. event.stageId .. " mode=" .. event.mode)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- E4: the server fires StageEnded once, but a duplicate must not repaint an open result.
+		if self.resultOpen then
+			log_warning("[UIResultLogic] duplicate StageEndedEvent dropped: " .. event.result)
+			return
+		end
+		self.resultOpen = true
+		self:ShowResult(event)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowResult(StageEndedEvent event)
+		-- Clear/fail branch per spec §4.8; stats payload schema is fixed by C-19.
+		local stats = event.stats or {}
+		local stageId = stats.stageId or self.lastStageId
+		local mode = stats.mode or self.lastMode
+		self.lastStageId = stageId
+		self.lastMode = mode
+		local reachedZen = stats.reachedZen or 0
+		local kills = stats.kills or 0
+		local elapsedMs = stats.elapsedMs or 0
+		local cfg = _StageCatalogLogic:GetStageConfig(stageId)
+		local stageLabel = stageId
+		local bossZen = 0
+		if cfg ~= nil then
+			stageLabel = "[" .. stageId .. "] " .. cfg.name
+			bossZen = cfg.bossZen
+		end
+		local modeName = mode
+		local modeCfg = _StageCatalogLogic:GetModeConfig(mode)
+		if modeCfg ~= nil then
+			modeName = modeCfg.name
+		end
+		self:SetText(self.subText, stageLabel .. "  ·  " .. modeName)
+		self:SetText(self.statsText, "도달 WAVE  " .. reachedZen .. " / " .. bossZen
+			.. "\n처치한 몬스터  " .. kills
+			.. "\n소요 시간  " .. self:FormatMs(elapsedMs))
+		local isClear = (event.result == "CLEAR")
+		if isClear then
+			self:SetText(self.titleText, "STAGE CLEAR!")
+			self:SetTextColor(self.titleText, Color(1, 0.84, 0.31, 1))
+			self:SetText(self.reasonText, "보스 머쉬맘을 처치했습니다!")
+		else
+			self:SetText(self.titleText, "STAGE FAILED")
+			self:SetTextColor(self.titleText, Color(1, 0.42, 0.38, 1))
+			self:SetText(self.reasonText, self:GetReasonMessage(event.reason))
+		end
+		local isTimeAttackClear = isClear and mode == "TIME_ATTACK"
+		self:SetShown(self.timeText, isTimeAttackClear)
+		self:SetShown(self.recordBadge, isTimeAttackClear and self:IsNewRecord(stageId, elapsedMs))
+		if isTimeAttackClear then
+			self:SetText(self.timeText, self:FormatMs(elapsedMs))
+		end
+		local nextStageId = _StageCatalogLogic:GetNextStageId(stageId)
+		self:SetShown(self.btnNext, isClear and nextStageId ~= "")
+		self:SetShown(self.btnContinue, (not isClear) and mode == "STORY" and (not self.continueUsed) and event.reason ~= "abandon")
+		self:SetShown(self.btnRetry, not isClear)
+		self:SetShown(self.btnLobby, true)
+		self:CenterButtons()
+		self:CenterTitleOnBar()
+		-- Order guarantee (R1): UIRouterLogic.OnStageEnded runs FlushModals off the SAME
+		-- StageEndedEvent bus, and bus handler order is undefined. Defer the group-enable to the
+		-- next tick so it always lands AFTER every StageEnded handler (including the router's modal
+		-- cleanup) in the current dispatch has finished — the populated popup can never be left
+		-- invisible by a late router toggle. resultOpen is already true, so a duplicate StageEnded
+		-- is still dropped meanwhile.
+		_TimerService:SetTimerOnce(function()
+			self:ApplyResultVisible(event)
+		end, 0)
+		log("[UIResultLogic] result populated: " .. event.result .. " reason=" .. event.reason .. " stage=" .. stageId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyResultVisible(StageEndedEvent event)
+		-- Deferred enable from ShowResult (see R1 note). Guard against a navigation that closed the
+		-- result before this tick fired: only enable if the popup is still meant to be open.
+		if not self.resultOpen then
+			return
+		end
+		if isvalid(self.groupRoot) then
+			self.groupRoot.Enable = true
+		end
+		-- The result screen is terminal; hide the in-game HUD so it does not bleed behind it.
+		-- Lobby/StageSelect transitions on close re-toggle GameHUD via the router, so no manual
+		-- restore is needed here.
+		_UIRouterLogic:ApplyModalHudOcclusion(true)
+		log("[UIResultLogic] result shown: " .. event.result .. " stage=" .. (self.lastStageId or ""))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CenterButtons()
+		-- The 4 action buttons are authored as fixed slots, but only a subset shows per result
+		-- (CLEAR: Next+Lobby; FAIL: Continue+Retry+Lobby; abandon: Retry+Lobby). Re-center the
+		-- currently-visible buttons symmetrically so a 2-button state is not right-heavy. Canonical
+		-- left-to-right order keeps the primary action left of Lobby in every combination.
+		local order = { self.btnContinue, self.btnRetry, self.btnNext, self.btnLobby }
+		local visible = {}
+		for _, btn in ipairs(order) do
+			if isvalid(btn) and btn.Enable then
+				table.insert(visible, btn)
+			end
+		end
+		local n = #visible
+		local spacing = 300
+		for i, btn in ipairs(visible) do
+			local ut = btn.UITransformComponent
+			if isvalid(ut) then
+				local x = (i - 1 - (n - 1) / 2) * spacing
+				ut.anchoredPosition = Vector2(x, ut.anchoredPosition.y)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CenterTitleOnBar()
+		-- TitleText is a child of HeaderBar (the only way its text renders above the bar sprite),
+		-- but the .ui serialization of a re-anchored child loses the center anchor on load
+		-- (offset/anchor mismatch), placing the title off the bar. Enforce the verified
+		-- center layout at show-time so it is robust to that serialization quirk.
+		if not isvalid(self.titleText) then
+			return
+		end
+		local ut = self.titleText.UITransformComponent
+		if not isvalid(ut) then
+			return
+		end
+		ut.AnchorsMin = Vector2(0.5, 0.5)
+		ut.AnchorsMax = Vector2(0.5, 0.5)
+		ut.Pivot = Vector2(0.5, 0.5)
+		ut.anchoredPosition = Vector2(0, 0)
+		ut.RectSize = Vector2(520, 90)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetReasonMessage(string reason)
+		-- Server reason codes -> player-facing Korean text (spec §4.8 wording).
+		if reason == "monster_overflow" then
+			return "몬스터가 너무 많아졌습니다"
+		elseif reason == "abandon" then
+			return "런을 포기했습니다"
+		end
+		return "보스를 처치하지 못했습니다"
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsNewRecord(string stageId, integer elapsedMs)
+		-- Compares against the pre-run progress snapshot; strictly smaller only (E12).
+		if elapsedMs <= 0 then
+			return false
+		end
+		local progress = _ModeStageLogic.ClientProgress
+		if progress == nil or progress.bestTime == nil then
+			return true
+		end
+		local best = progress.bestTime[stageId]
+		return best == nil or elapsedMs < best
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetClientEnergy()
+		-- Cached meta status push (PlayerDataLogic.SyncMetaStatus); returns -1 when not yet synced
+		-- so callers can distinguish "unknown" from "zero" and avoid a false pre-deny.
+		local status = _PlayerDataLogic:GetClientMetaStatus()
+		if status == nil or status.energy == nil then
+			return -1
+		end
+		return status.energy
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean HasEnergyFor(integer cost)
+		-- Advisory client pre-check mirroring the server energy guard. Unknown energy (-1) passes
+		-- through to let the server stay authoritative; only a confirmed shortfall blocks early.
+		local energy = self:GetClientEnergy()
+		if energy < 0 then
+			return true
+		end
+		return energy >= cost
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetEntryEnergyCost(string mode)
+		-- Mirrors RequestEnterStage cost branch: only energy-cost modes spend energy on entry;
+		-- coin modes return 0 (no energy gate). Unknown mode config is treated as no energy cost.
+		local modeCfg = _StageCatalogLogic:GetModeConfig(mode)
+		if modeCfg == nil or modeCfg.costType ~= "energy" then
+			return 0
+		end
+		return modeCfg.entryCost or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnContinueClicked()
+		-- Drop a duplicate tap while a prior retry/next/continue is still awaiting StageStarted.
+		if self:IsEntryInFlight() then
+			return
+		end
+		-- STORY-only resume from the failed zen; the server re-validates count and cost (D3).
+		-- Stale-data guard (mirrors OnRetry/OnNext): continue is only valid for a STORY run with a
+		-- known stage. If that re-entry context is missing, RequestContinue would be server-denied and
+		-- the bare CloseResult below would expose the stale board GameHud underneath. Route to Lobby so
+		-- the board HUD is hidden, not just the popup.
+		if self.lastStageId == "" or self.lastMode ~= "STORY" then
+			_UIToastLogic:ShowMessage("스테이지 선택 화면에서 다시 도전해 주세요")
+			_UIRouterLogic:GoLobby()
+			return
+		end
+		-- Continue always costs 1 energy (reason "continue", §7.10), so pre-check before requesting.
+		if not self:HasEnergyFor(1) then
+			_UIToastLogic:ShowMessage("에너지가 부족해 이어하기를 할 수 없습니다")
+			return
+		end
+		self.continuePending = true
+		log("[UIResultLogic] continue requested: stage=" .. self.lastStageId)
+		_ModeStageLogic:RequestContinue()
+		-- Defer close to the StageStarted success signal; a server deny keeps the popup open (see ArmPendingClose).
+		self:ArmPendingClose()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRetryClicked()
+		-- Drop a duplicate tap while a prior retry/next/continue is still awaiting StageStarted.
+		if self:IsEntryInFlight() then
+			return
+		end
+		-- Re-enters with the cached loadout; unlock/cost re-validation is server-side.
+		if self.cachedJobId == "" or self.cachedSkillId == "" then
+			_UIToastLogic:ShowMessage("스테이지 선택 화면에서 다시 도전해 주세요")
+			-- No re-entry: same stale-GameHud hazard as OnLobbyClicked. Route to Lobby so the board
+			-- HUD is hidden, not just the popup. (Energy-shortfall early-return below intentionally
+			-- keeps the popup open so the player can pick another action.)
+			_UIRouterLogic:GoLobby()
+			return
+		end
+		if not self:HasEnergyFor(self:GetEntryEnergyCost(self.lastMode)) then
+			_UIToastLogic:ShowMessage("에너지가 부족해 다시하기를 할 수 없습니다")
+			return
+		end
+		log("[UIResultLogic] retry requested: stage=" .. self.lastStageId)
+		_ModeStageLogic:RequestEnterStage(self.lastMode, self.lastStageId, self.cachedJobId, self.cachedSkillId)
+		-- Defer close to the StageStarted success signal; a server deny keeps the popup open (see ArmPendingClose).
+		self:ArmPendingClose()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnNextClicked()
+		-- Drop a duplicate tap while a prior retry/next/continue is still awaiting StageStarted.
+		if self:IsEntryInFlight() then
+			return
+		end
+		-- Next stage in catalog order; the button is hidden on the last stage (1-6).
+		local nextStageId = _StageCatalogLogic:GetNextStageId(self.lastStageId)
+		if nextStageId == "" or self.cachedJobId == "" or self.cachedSkillId == "" then
+			_UIToastLogic:ShowMessage("스테이지 선택 화면에서 다음 스테이지에 도전해 주세요")
+			-- No re-entry: route to Lobby so closing the popup doesn't expose the stale board HUD.
+			_UIRouterLogic:GoLobby()
+			return
+		end
+		if not self:HasEnergyFor(self:GetEntryEnergyCost(self.lastMode)) then
+			_UIToastLogic:ShowMessage("에너지가 부족해 다음 스테이지에 도전할 수 없습니다")
+			return
+		end
+		log("[UIResultLogic] next stage requested: " .. nextStageId)
+		_ModeStageLogic:RequestEnterStage(self.lastMode, nextStageId, self.cachedJobId, self.cachedSkillId)
+		-- Defer close to the StageStarted success signal; a server deny keeps the popup open (see ArmPendingClose).
+		self:ArmPendingClose()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLobbyClicked()
+		-- On FAIL the live screen beneath the popup is GameHud (router went there on StageStarted),
+		-- so merely closing the result group would expose the stale board HUD. Drive the router to
+		-- Lobby: GoLobby runs CloseResultModal (group OFF + resultOpen reset) then ApplyScreen(LOBBY),
+		-- giving D9 exclusivity (GameHUDGroup off, LobbyGroup on).
+		log("[UIResultLogic] back to lobby")
+		_UIRouterLogic:GoLobby()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseResult()
+		-- Single close path keeps resultOpen consistent with the group state.
+		-- Idempotent: consecutive screen changes (GoLobby->GoStageSelect) both route here via
+		-- CloseResultModal; once closed, re-entry is a clean no-op. The group is enabled only when
+		-- resultOpen is true (ApplyResultVisible is resultOpen-guarded), so this never strands an
+		-- enabled root.
+		if not self.resultOpen then
+			return
+		end
+		-- Any close path supersedes a deferred close: drop the pending flag and cancel its failsafe so a
+		-- late StageStarted (or the grace timer) cannot re-toggle an already-closed popup.
+		self.pendingClose = false
+		self:ClearPendingCloseTimer()
+		if isvalid(self.groupRoot) then
+			self.groupRoot.Enable = false
+		end
+		self.resultOpen = false
+		-- Repay the single occlusion increment ApplyResultVisible took (router refcounts modal
+		-- occlusion). The result never decremented on close before — it relied on the screen change to
+		-- drop the side-HUDs — but the refcount would then stay latched into the next run. The decrement
+		-- floors at zero in the router, so it is safe even if ApplyResultVisible never ran (rapid close
+		-- before its deferred tick). Re-entry that stays on GameHud (next/retry/continue) gets the
+		-- side-HUDs restored by the fresh StageStarted self-show.
+		_UIRouterLogic:ApplyModalHudOcclusion(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetText(Entity textEntity, string value)
+		-- nil-guarded text write shared by every label on the panel.
+		if isvalid(textEntity) and isvalid(textEntity.TextComponent) then
+			textEntity.TextComponent.Text = value
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetTextColor(Entity textEntity, Color value)
+		-- nil-guarded font color write (clear=gold / fail=red).
+		if isvalid(textEntity) and isvalid(textEntity.TextComponent) then
+			textEntity.TextComponent.FontColor = value
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetShown(Entity target, boolean shown)
+		-- Enable (not Visible) per runtime-patterns: Visible=false keeps clicks alive.
+		if isvalid(target) then
+			target.Enable = shown
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatMs(integer ms)
+		-- mm:ss.cs for HUD/result time display (time-attack records are ms-precision server-side).
+		if ms < 0 then
+			ms = 0
+		end
+		local centis = math.floor(ms / 10) % 100
+		local totalSec = math.floor(ms / 1000)
+		local sec = totalSec % 60
+		local min = math.floor(totalSec / 60)
+		return string.format("%02d:%02d.%02d", min, sec, centis)
+	end
+
+end

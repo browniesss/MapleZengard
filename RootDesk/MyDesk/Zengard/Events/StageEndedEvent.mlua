@@ -1,0 +1,10 @@
+@Event
+script StageEndedEvent extends EventType
+
+	property string result = ""
+
+	property string reason = ""
+
+	property table stats = {}
+
+end

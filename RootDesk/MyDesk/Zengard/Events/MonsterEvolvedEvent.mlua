@@ -1,0 +1,14 @@
+@Event
+script MonsterEvolvedEvent extends EventType
+
+	property string oldMonsterId = ""
+
+	property string newMonsterId = ""
+
+	property string newTypeId = ""
+
+	property integer col = 0
+
+	property integer row = 0
+
+end

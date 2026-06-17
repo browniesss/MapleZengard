@@ -1,0 +1,82 @@
+@Logic
+script JobLogic extends Logic
+
+	@Sync
+	property SyncTable<string, string> JobByUser
+
+	-- jobId -> board weapon. Real MapleStory weapon avataritems, each RUID confirmed to actually RENDER
+	-- on the avatar in-engine (many catalog weapon RUIDs are non-renderable placeholders that equip
+	-- without drawing anything — these four were screenshot-verified to draw the bow/staff/dagger/sword).
+	-- staff/dagger/sword are one-handed (OneHandedWeapon=13); the bow is two-handed (TwoHandedWeapon=14).
+	-- Plain 32-hex avataritem RUIDs only — SetEquip silently rejects a thumbnail:// prefix.
+	property table jobWeapons = nil
+
+	method void EnsureJobWeapons()
+		-- Lazy build so the enum is resolved at call time, not at @Logic construction.
+		if self.jobWeapons ~= nil then
+			return
+		end
+		self.jobWeapons = {
+			mage = { ruid = "989be911209545fdacf84f92874cb338", category = MapleAvatarItemCategory.OneHandedWeapon },
+			archer = { ruid = "b38cb173f5554259aeafaeb9f7afd948", category = MapleAvatarItemCategory.TwoHandedWeapon },
+			thief = { ruid = "11ccce1ca9224050897b2d59fe14a3bf", category = MapleAvatarItemCategory.OneHandedWeapon },
+			warrior = { ruid = "447d6b79023545e892581dbcc09a003e", category = MapleAvatarItemCategory.OneHandedWeapon },
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetJob(string userId, string jobId)
+		-- StartStage-only entry point (C-10); job advancement tier is GrowthLogic's, not ours.
+		if _CombatConfig:GetJobMeta(jobId) == nil then
+			log_warning("[JobLogic] invalid jobId rejected: " .. tostring(jobId))
+			return
+		end
+		self.JobByUser[userId] = jobId
+		log("[JobLogic] job set: " .. userId .. " -> " .. jobId)
+		self:EquipJobWeapon(userId, jobId)
+		local ev = JobSelectedEvent()
+		ev.userId = userId
+		ev.jobId = jobId
+		_ZengardGameLogic:SendGameEvent(ev)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EquipJobWeapon(string userId, string jobId)
+		-- Visibly equip the class weapon on the board avatar. The custom weapon slot is @Sync, so this
+		-- server-side write propagates to every client automatically. UseCustomEquipOnly stays false so
+		-- only the weapon slot is overridden and the player keeps the rest of their costume. Both custom
+		-- weapon slots are cleared first so a job change within a run never leaves a stale second weapon.
+		self:EnsureJobWeapons()
+		local weapon = self.jobWeapons[jobId]
+		if weapon == nil then
+			-- A jobId validated by GetJobMeta but absent here (e.g. a future job) would silently keep the
+			-- previous weapon; log it so the gap is visible at playtest instead of a stale weapon.
+			log_warning("[JobLogic] no board weapon mapped for job: " .. tostring(jobId))
+			return
+		end
+		local userEntity = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(userEntity) then
+			log_warning("[JobLogic] equip weapon skipped: user entity not found " .. userId)
+			return
+		end
+		local costume = userEntity.CostumeManagerComponent
+		if not isvalid(costume) then
+			log_warning("[JobLogic] equip weapon skipped: no CostumeManagerComponent " .. userId)
+			return
+		end
+		costume:SetEquip(MapleAvatarItemCategory.OneHandedWeapon, "")
+		costume:SetEquip(MapleAvatarItemCategory.TwoHandedWeapon, "")
+		costume:SetEquip(weapon.category, weapon.ruid)
+		log("[JobLogic] weapon equipped: " .. userId .. " job=" .. jobId .. " ruid=" .. weapon.ruid)
+	end
+
+	method string GetJob(string userId)
+		-- "" means not selected; readable on both sides via @Sync (#3's GetUserJob maps here, C-14).
+		local jobId = self.JobByUser[userId]
+		if jobId == nil then
+			return ""
+		end
+		return jobId
+	end
+
+end

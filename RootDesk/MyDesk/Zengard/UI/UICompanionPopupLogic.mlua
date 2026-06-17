@@ -1,0 +1,243 @@
+@Logic
+script UICompanionPopupLogic extends Logic
+
+	property Entity popupRoot = "8f631460-4250-4cec-8fe5-9d315fa3cfa3"
+
+	property TextComponent titleText = "8c1aff9b-db69-4c6f-b32b-0cd6990ff5e2"
+
+	property TextComponent bodyText = "80e98672-cb6e-4a5c-a8ca-0b4810ca16e6"
+
+	property Entity btnConfirm = "5572858a-112a-4cd1-b2d2-285c772f636c"
+
+	property Entity cand1 = "51a12c45-d6fd-4f17-a79e-43903974c920"
+
+	property Entity cand2 = "37ae639d-375f-47f0-9054-b960157e9831"
+
+	property Entity cand3 = "a192e636-6e0e-4d55-9a6e-e01469354517"
+
+	property string clickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	property number sfxVolume = 0.8
+
+	property boolean isOpen = false
+
+	property boolean wired = false
+
+	property any candEntities = nil
+
+	property any inputHandlers = nil
+
+	property any busHandlers = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Server-bus subscriptions are safe at OnBeginPlay; candidate tiles + confirm button live inside the
+		-- DefaultShow=false group, so their wiring is deferred to TryWire (children exist only after Enable=true).
+		log("[UICompanionPopupLogic] OnBeginPlay")
+		self.inputHandlers = {}
+		self.busHandlers = {}
+		self:Subscribe(CompanionJoinedEvent, self.OnCompanionJoined)
+		self:Subscribe(StageEndedEvent, self.OnStageEnded)
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number dt)
+		-- Retry wiring each frame until the popup group has been enabled once and its children exist.
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryWire()
+		-- Wires the confirm button once it is valid (false → retry next frame).
+		if self.candEntities == nil then
+			self.candEntities = { self.cand1, self.cand2, self.cand3 }
+		end
+		if not isvalid(self.btnConfirm) then
+			return false
+		end
+		self:WireButton(self.btnConfirm, function() self:ClosePopup() end)
+		log("[UICompanionPopupLogic] wired")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Mandatory release of every handler connected in OnBeginPlay.
+		if self.inputHandlers ~= nil then
+			for _, rec in ipairs(self.inputHandlers) do
+				if isvalid(rec.target) then
+					rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+				end
+			end
+			self.inputHandlers = nil
+		end
+		if self.busHandlers ~= nil then
+			for _, rec in ipairs(self.busHandlers) do
+				_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+			self.busHandlers = nil
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowCompanionJoin(table candidates)
+		-- §4.9 client API: presents the candidate summary; resolution happens via ChoicePopup cards (C-2).
+		if self.candEntities == nil then
+			self.candEntities = { self.cand1, self.cand2, self.cand3 }
+		end
+		local count = math.min(#candidates, #self.candEntities)
+		for slot = 1, #self.candEntities do
+			local candEntity = self.candEntities[slot]
+			if isvalid(candEntity) then
+				if slot <= count then
+					self:FillCandidate(candEntity, candidates[slot].name or candidates[slot].choiceId or "")
+					candEntity.Enable = true
+				else
+					candEntity.Enable = false
+				end
+			end
+		end
+		if isvalid(self.titleText) then
+			self.titleText.Text = "동료가 합류합니다!"
+		end
+		if isvalid(self.bodyText) then
+			self.bodyText.Text = "선택지에서 동료 직업군을 골라주세요. 2차 전직 기준으로 랜덤 합류합니다."
+		end
+		-- Occlusion is reference-counted by the router; only increment on the closed->open transition so
+		-- a re-present over an already-open popup can't leave a depth that the single Close never repays.
+		local wasOpen = self.isOpen
+		self.isOpen = true
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = true
+		end
+		if not wasOpen then
+			_UIRouterLogic:ApplyModalHudOcclusion(true)
+		end
+		log("[UICompanionPopupLogic] show companion candidates: " .. count)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClosePopup()
+		if not self.isOpen then
+			return
+		end
+		self.isOpen = false
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = false
+		end
+		_UIRouterLogic:ApplyModalHudOcclusion(false)
+		log("[UICompanionPopupLogic] companion popup closed")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCompanionJoined(CompanionJoinedEvent event)
+		-- §3 receiver: join celebration. Companions are run-shared, so no per-user filter.
+		if self.candEntities == nil then
+			self.candEntities = { self.cand1, self.cand2, self.cand3 }
+		end
+		local secondJobName = self:GetSecondJobDisplayName(event.secondJob)
+		for slot = 1, #self.candEntities do
+			local candEntity = self.candEntities[slot]
+			if isvalid(candEntity) then
+				-- Single joined card is centered in the middle slot.
+				if slot == 2 then
+					self:FillCandidate(candEntity, secondJobName)
+					candEntity.Enable = true
+				else
+					candEntity.Enable = false
+				end
+			end
+		end
+		if isvalid(self.titleText) then
+			self.titleText.Text = "동료 합류!"
+		end
+		if isvalid(self.bodyText) then
+			self.bodyText.Text = self:GetJobGroupDisplayName(event.jobGroup) .. " 직업군의 " .. secondJobName .. " 동료가 합류했습니다!"
+		end
+		-- Only increment occlusion on the closed->open transition (a second companion join can fire
+		-- while this celebration is still up; MAX_COMPANIONS=2). The single Close repays exactly one.
+		local wasOpen = self.isOpen
+		self.isOpen = true
+		if isvalid(self.popupRoot) then
+			self.popupRoot.Enable = true
+		end
+		if not wasOpen then
+			_UIRouterLogic:ApplyModalHudOcclusion(true)
+		end
+		log("[UICompanionPopupLogic] companion join shown: " .. event.secondJob)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStageEnded(StageEndedEvent event)
+		-- Spec E3: the Result flow discards any open modal.
+		self:ClosePopup()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FillCandidate(Entity candEntity, string displayName)
+		-- Candidate tiles only carry a name label in the prototype shell.
+		local nameText = candEntity:GetChildByName("NameText", false)
+		if isvalid(nameText) then
+			nameText.TextComponent.Text = displayName
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetJobGroupDisplayName(string jobGroup)
+		-- Display-only names (C-14 job key vocabulary); authoritative data stays inside #5 CompanionConfig.
+		local names = { warrior = "전사", archer = "궁수", mage = "마법사", thief = "도적" }
+		return names[jobGroup] or jobGroup
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetSecondJobDisplayName(string secondJob)
+		-- §7.6 SECOND_JOB_POOL vocabulary → Korean display names.
+		local names = {
+			PAGE = "페이지",
+			FIGHTER = "파이터",
+			SPEARMAN = "스피어맨",
+			FP_WIZARD = "불독 마법사",
+			IL_WIZARD = "썬콜 마법사",
+			CLERIC = "클레릭",
+			HUNTER = "헌터",
+			CROSSBOWMAN = "석궁사수",
+			ASSASSIN = "어쌔신",
+			BANDIT = "밴디트",
+		}
+		return names[secondJob] or secondJob
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireButton(Entity buttonEntity, any onClick)
+		-- Click + hover SFX wiring (ui-sound.md defaults); handlers tracked for OnEndPlay release.
+		if not isvalid(buttonEntity) then
+			log_warning("[UICompanionPopupLogic] button entity not bound")
+			return
+		end
+		local clickHandler = buttonEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSoundRuid, self.sfxVolume)
+			onClick()
+		end)
+		table.insert(self.inputHandlers, { target = buttonEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = buttonEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSoundRuid, self.sfxVolume)
+		end)
+		table.insert(self.inputHandlers, { target = buttonEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(any eventType, any eventHandler)
+		-- All game events arrive through the ZengardGameLogic client-side bus (§3).
+		table.insert(self.busHandlers, { evType = eventType, evHandler = _ZengardGameLogic:ConnectEvent(eventType, eventHandler) })
+	end
+
+end

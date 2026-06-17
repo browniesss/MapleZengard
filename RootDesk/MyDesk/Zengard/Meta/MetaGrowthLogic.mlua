@@ -1,0 +1,266 @@
+@Logic
+script MetaGrowthLogic extends Logic
+
+	-- Account-bound meta growth (MASTER_PLAN §2.1 / §4.8 / §7.8, spec #6 R9~R11, C-1).
+	-- Persists through the PlayerDataLogic section gateway only (C-24); never touches
+	-- DataStorage directly. Dirty marking / debounce flush is PlayerDataLogic's job.
+
+	property string ClientGrowthJson = ""
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Per-user state loads lazily on first access; nothing to wire here.
+		log("[MetaGrowthLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetGrowthMultipliers(string userId)
+		-- Same 8-key schema as GetEquipStatMultipliers; absent effects stay 0 (§4.8).
+		local growth = self:EnsureLoaded(userId)
+		local result = self:NewMultiplierTable()
+		for _, statKey in ipairs(_MetaGrowthBalance:GetAllStatKeys()) do
+			local track = _MetaGrowthBalance:GetStatTrack(statKey)
+			local level = growth.stats[statKey]
+			result[track.multiplierKey] = result[track.multiplierKey] + level * track.perLevel
+		end
+		for _, slotKey in ipairs(_MetaGrowthBalance:GetAllEquipSlotKeys()) do
+			local def = _MetaGrowthBalance:GetEquipDef(slotKey)
+			local equip = growth.equips[slotKey]
+			if equip.own == 1 and equip.lv > 0 then
+				result[def.multiplierKey] = result[def.multiplierKey] + equip.lv * def.perLevel
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("Server")
+	method void RequestUpgradeStat(string statKey)
+		-- Validate -> spend -> apply in one server call (no wait() in between, spec §7.5).
+		local userId = senderUserId
+		local track = _MetaGrowthBalance:GetStatTrack(statKey)
+		if track == nil then
+			log_warning("[MetaGrowthLogic] unknown stat: " .. statKey)
+			return
+		end
+		local growth = self:EnsureLoaded(userId)
+		local level = growth.stats[statKey]
+		if level >= _MetaGrowthBalance.STAT_MAX_LEVEL then
+			self:NotifyGrowthDenied("최대 강화입니다", userId)
+			return
+		end
+		local cost = _MetaGrowthBalance:GetStatUpgradeCost(level)
+		if not _PlayerDataLogic:TrySpendCurrency(userId, "meso", cost) then
+			log("[MetaGrowthLogic] stat upgrade denied (meso): user=" .. userId .. " stat=" .. statKey .. " cost=" .. tostring(cost))
+			self:NotifyGrowthDenied("메소가 부족합니다", userId)
+			return
+		end
+		growth.stats[statKey] = level + 1
+		self:SaveGrowth(userId)
+		log("[MetaGrowthLogic] stat upgraded: user=" .. userId .. " stat=" .. statKey .. " lv=" .. tostring(level + 1))
+		self:EmitGrowthChanged(userId, "stat", statKey)
+		self:PushGrowthState(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestBuyGrowthEquip(string slotKey)
+		-- Purchase puts the slot at enhance Lv 0; effects start from the first enhance (§7.8).
+		local userId = senderUserId
+		local def = _MetaGrowthBalance:GetEquipDef(slotKey)
+		if def == nil then
+			log_warning("[MetaGrowthLogic] unknown growth equip slot: " .. slotKey)
+			return
+		end
+		local growth = self:EnsureLoaded(userId)
+		local equip = growth.equips[slotKey]
+		if equip.own == 1 then
+			return
+		end
+		if not _PlayerDataLogic:TrySpendCurrency(userId, "meso", def.priceMeso) then
+			log("[MetaGrowthLogic] growth equip purchase denied (meso): user=" .. userId .. " slot=" .. slotKey .. " cost=" .. tostring(def.priceMeso))
+			self:NotifyGrowthDenied("메소가 부족합니다", userId)
+			return
+		end
+		equip.own = 1
+		equip.lv = 0
+		self:SaveGrowth(userId)
+		log("[MetaGrowthLogic] growth equip purchased: user=" .. userId .. " slot=" .. slotKey)
+		self:EmitGrowthChanged(userId, "equip_buy", slotKey)
+		self:PushGrowthState(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestEnhanceGrowthEquip(string slotKey)
+		-- The final step (Lv4 -> 5) costs meso + red meso; both balances are pre-checked
+		-- before either is spent so a partial deduction cannot happen (E15).
+		local userId = senderUserId
+		local def = _MetaGrowthBalance:GetEquipDef(slotKey)
+		if def == nil then
+			log_warning("[MetaGrowthLogic] unknown growth equip slot: " .. slotKey)
+			return
+		end
+		local growth = self:EnsureLoaded(userId)
+		local equip = growth.equips[slotKey]
+		if equip.own ~= 1 then
+			return
+		end
+		if equip.lv >= _MetaGrowthBalance.EQUIP_MAX_ENHANCE_LEVEL then
+			self:NotifyGrowthDenied("최대 강화입니다", userId)
+			return
+		end
+		local targetLevel = equip.lv + 1
+		local mesoCost = _MetaGrowthBalance:GetEquipEnhanceCost(targetLevel)
+		local needsRedMeso = _MetaGrowthBalance:NeedsRedMesoForEnhance(targetLevel)
+		if _PlayerDataLogic:GetMeso(userId) < mesoCost then
+			log("[MetaGrowthLogic] growth equip enhance denied (meso): user=" .. userId .. " slot=" .. slotKey .. " cost=" .. tostring(mesoCost))
+			self:NotifyGrowthDenied("메소가 부족합니다", userId)
+			return
+		end
+		if needsRedMeso and _PlayerDataLogic:GetRedMeso(userId) < _MetaGrowthBalance.EQUIP_FINAL_ENHANCE_RED_MESO_COST then
+			log("[MetaGrowthLogic] growth equip enhance denied (red meso): user=" .. userId .. " slot=" .. slotKey)
+			self:NotifyGrowthDenied("레드메소가 부족합니다", userId)
+			return
+		end
+		if not _PlayerDataLogic:TrySpendCurrency(userId, "meso", mesoCost) then
+			return
+		end
+		if needsRedMeso then
+			_PlayerDataLogic:TrySpendCurrency(userId, "redMeso", _MetaGrowthBalance.EQUIP_FINAL_ENHANCE_RED_MESO_COST)
+		end
+		equip.lv = targetLevel
+		self:SaveGrowth(userId)
+		log("[MetaGrowthLogic] growth equip enhanced: user=" .. userId .. " slot=" .. slotKey .. " lv=" .. tostring(targetLevel))
+		self:EmitGrowthChanged(userId, "equip_enhance", slotKey)
+		self:PushGrowthState(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSyncGrowth()
+		-- Initial client pull — avoids the UI OnBeginPlay push race (spec §5.3).
+		self:EnsureLoaded(senderUserId)
+		self:PushGrowthState(senderUserId)
+	end
+
+	@ExecSpace("Client")
+	method void SyncGrowthState(string growthJson)
+		-- Client-side cache; UIMetaGrowthPopupLogic (Wave 3) reads ClientGrowthJson.
+		self.ClientGrowthJson = growthJson
+		log("[MetaGrowthLogic] growth state synced (client)")
+	end
+
+	@ExecSpace("Client")
+	method void NotifyGrowthDenied(string reason)
+		-- Server -> requesting client only; the popup surfaces the reason as a toast.
+		_UIMetaGrowthPopupLogic:ShowGrowthDenied(reason)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table EnsureLoaded(string userId)
+		-- Loads from the section gateway once, then serves the in-memory cache.
+		if self._T.growth == nil then
+			self._T.growth = {}
+		end
+		local growth = self._T.growth[userId]
+		if growth ~= nil then
+			return growth
+		end
+		local raw = _PlayerDataLogic:GetSection(userId, "metaGrowth")
+		-- JSON (not _UtilLogic:TableToString) — the growth table is nested (stats/equips),
+		-- and TableToString only serializes one level, dropping nested values as table refs.
+		-- The leading-"{" check also discards any legacy TableToString payload so it can't crash JSONDecode.
+		if _UtilLogic:IsNilorEmptyString(raw) or string.sub(raw, 1, 1) ~= "{" then
+			growth = self:DefaultGrowthTable()
+		else
+			growth = self:NormalizeGrowthTable(_HttpService:JSONDecode(raw))
+		end
+		self._T.growth[userId] = growth
+		log("[MetaGrowthLogic] growth loaded: user=" .. userId)
+		return growth
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveGrowth(string userId)
+		-- SetSection marks dirty; PlayerDataLogic owns the 30s debounce flush (C-24).
+		local growth = self._T.growth[userId]
+		if growth == nil then
+			return
+		end
+		_PlayerDataLogic:SetSection(userId, "metaGrowth", _HttpService:JSONEncode(growth))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EmitGrowthChanged(string userId, string changeKind, string targetKey)
+		-- Notifies server systems that cached meta-growth multipliers are stale.
+		local ev = MetaGrowthChangedEvent()
+		ev.userId = userId
+		ev.changeKind = changeKind
+		ev.targetKey = targetKey
+		_ZengardGameLogic:SendGameEvent(ev)
+		log("[MetaGrowthLogic] growth changed event: user=" .. userId .. " kind=" .. changeKind .. " target=" .. targetKey)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushGrowthState(string userId)
+		-- Server -> owner client RPC push; the trailing arg targets one client.
+		local growth = self._T.growth[userId]
+		if growth == nil then
+			return
+		end
+		self:SyncGrowthState(_HttpService:JSONEncode(growth), userId)
+	end
+
+	method table DefaultGrowthTable()
+		-- Fresh-account shape of the persisted metaGrowth section (MASTER_PLAN §6).
+		return {
+			stats = { atk = 0, exp = 0, loot = 0 },
+			equips = {
+				weapon = { own = 0, lv = 0 },
+				armor = { own = 0, lv = 0 },
+				charm = { own = 0, lv = 0 },
+			},
+		}
+	end
+
+	method table NormalizeGrowthTable(table growth)
+		-- E14 — fills any missing field with defaults so older payloads keep loading.
+		local result = self:DefaultGrowthTable()
+		if growth == nil then
+			return result
+		end
+		if growth.stats ~= nil then
+			for statKey, level in pairs(result.stats) do
+				if growth.stats[statKey] ~= nil then
+					result.stats[statKey] = growth.stats[statKey]
+				end
+			end
+		end
+		if growth.equips ~= nil then
+			for slotKey, _ in pairs(result.equips) do
+				local equip = growth.equips[slotKey]
+				if equip ~= nil then
+					if equip.own ~= nil then
+						result.equips[slotKey].own = equip.own
+					end
+					if equip.lv ~= nil then
+						result.equips[slotKey].lv = equip.lv
+					end
+				end
+			end
+		end
+		return result
+	end
+
+	method table NewMultiplierTable()
+		-- Full key schema of GetEquipStatMultipliers (§4.8) initialized to zero.
+		return {
+			atkMul = 0,
+			atkSpeedMul = 0,
+			skillDmgMul = 0,
+			critChanceAdd = 0,
+			rangeAdd = 0,
+			targetAdd = 0,
+			expGainMul = 0,
+			lootDropAdd = 0,
+		}
+	end
+
+end

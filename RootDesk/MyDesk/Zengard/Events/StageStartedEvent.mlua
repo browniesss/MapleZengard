@@ -1,0 +1,8 @@
+@Event
+script StageStartedEvent extends EventType
+
+	property string stageId = ""
+
+	property string mode = ""
+
+end

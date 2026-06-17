@@ -1,0 +1,151 @@
+@Logic
+script StageCatalogLogic extends Logic
+
+	property table stages = {}
+
+	property table stageIdList = {}
+
+	property table modes = {}
+
+	property table themes = {}
+
+	property boolean catalogBuilt = false
+
+	property integer DEFAULT_BOSS_ZEN = 20
+
+	property string BOSS_MODEL_ID = "mushmom"
+
+	property integer DEFAULT_EVOLVE_ZEN = 10
+
+	property number DEFAULT_GOLEM_SPLIT_RATE = 1.0
+
+	property number DEFAULT_BOSS_SUMMON_RATE = 1.0
+
+	method void OnInitialize()
+		-- Catalog must exist on both server and client (ExecSpace unspecified by contract §2.1).
+		self:EnsureCatalog()
+	end
+
+	method void EnsureCatalog()
+		-- Lazy guard: callers may query from their own OnInitialize before ours runs.
+		if self.catalogBuilt then
+			return
+		end
+		self.catalogBuilt = true
+		self.themes["1"] = { themeId = "1", name = "헤네시스" }
+		-- MASTER_PLAN §7.1 STAGES (single source, C-6/C-7).
+		self:AddStage("1-1", "버섯 언덕", 3, { orangemushroom = 100 }, 40, {})
+		self:AddStage("1-2", "버섯 숲", 4, { orangemushroom = 100 }, 40, {})
+		self:AddStage("1-3", "돌의 정원", 4, { orangemushroom = 75, stonegolem = 25 }, 40, {})
+		self:AddStage("1-4", "진화의 숲", 4, { orangemushroom = 90, stonegolem = 10 }, 40, { evolveZen = 7 })
+		self:AddStage("1-5", "골렘 채석장", 4, { orangemushroom = 60, stonegolem = 40 }, 38, { golemSplitRate = 1.5 })
+		self:AddStage("1-6", "머쉬맘의 안식처", 5, { orangemushroom = 70, stonegolem = 30 }, 36, { bossSummonRate = 1.5 })
+		-- MASTER_PLAN §7.1 modes: STORY(energy, continue x1) / CHALLENGE(coin 1, refund on clear) / TIME_ATTACK(energy, best time).
+		self.modes["STORY"] = { modeId = "STORY", name = "스토리 모드", costType = "energy", entryCost = 1, continueLimit = 1, refundCoinOnClear = false, recordBestTime = false }
+		self.modes["CHALLENGE"] = { modeId = "CHALLENGE", name = "챌린지 모드", costType = "coin", entryCost = 1, continueLimit = 0, refundCoinOnClear = true, recordBestTime = false }
+		self.modes["TIME_ATTACK"] = { modeId = "TIME_ATTACK", name = "타임어택 모드", costType = "energy", entryCost = 1, continueLimit = 0, refundCoinOnClear = false, recordBestTime = true }
+	end
+
+	method void OnBeginPlay()
+		-- OnInitialize ordering across @Logic instances is not guaranteed, so re-assert the
+		-- catalog here; the catalogBuilt guard makes the call idempotent.
+		self:EnsureCatalog()
+		log("[StageCatalogLogic] OnBeginPlay stages=" .. #self.stageIdList)
+	end
+
+	method void AddStage(string stageId, string stageName, integer monstersPerZen, table spawnWeights, integer failThreshold, table modifiers)
+		-- Registers one stage row and keeps the ordered id list for unlock progression.
+		self.stages[stageId] = {
+			stageId = stageId,
+			name = stageName,
+			themeId = "1",
+			monstersPerZen = monstersPerZen,
+			spawnWeights = spawnWeights,
+			bossZen = self.DEFAULT_BOSS_ZEN,
+			failThreshold = failThreshold,
+			modifiers = modifiers,
+		}
+		table.insert(self.stageIdList, stageId)
+	end
+
+	method table GetStageConfig(string stageId)
+		-- Returns the §7.1 schema as a fresh copy so callers cannot mutate the catalog. nil for unknown ids.
+		self:EnsureCatalog()
+		local stage = self.stages[stageId]
+		if stage == nil then
+			return nil
+		end
+		local weights = {}
+		for typeId, weight in pairs(stage.spawnWeights) do
+			weights[typeId] = weight
+		end
+		return {
+			stageId = stage.stageId,
+			name = stage.name,
+			themeId = stage.themeId,
+			boardW = _BoardConfig.GRID_COLS,
+			boardH = _BoardConfig.GRID_ROWS,
+			monstersPerZen = stage.monstersPerZen,
+			spawnWeights = weights,
+			bossZen = stage.bossZen,
+			failThreshold = stage.failThreshold,
+			bossModelId = self.BOSS_MODEL_ID,
+			repositionMonstersOnZen = _BoardConfig.REPOSITION_MONSTERS_ON_ZEN,
+			modifiers = {
+				evolveZen = stage.modifiers.evolveZen or self.DEFAULT_EVOLVE_ZEN,
+				golemSplitRate = stage.modifiers.golemSplitRate or self.DEFAULT_GOLEM_SPLIT_RATE,
+				bossSummonRate = stage.modifiers.bossSummonRate or self.DEFAULT_BOSS_SUMMON_RATE,
+			},
+		}
+	end
+
+	method table GetStageIds()
+		-- Ordered stageId list ("1-1".."1-6") as a copy.
+		self:EnsureCatalog()
+		local ids = {}
+		for _, id in ipairs(self.stageIdList) do
+			table.insert(ids, id)
+		end
+		return ids
+	end
+
+	method string GetNextStageId(string stageId)
+		-- Next stage in progression order, "" when stageId is last or unknown.
+		self:EnsureCatalog()
+		for i, id in ipairs(self.stageIdList) do
+			if id == stageId then
+				return self.stageIdList[i + 1] or ""
+			end
+		end
+		return ""
+	end
+
+	method table GetModeConfig(string modeId)
+		-- Mode rule row as a copy. nil for unknown modes.
+		self:EnsureCatalog()
+		local mode = self.modes[modeId]
+		if mode == nil then
+			return nil
+		end
+		return {
+			modeId = mode.modeId,
+			name = mode.name,
+			costType = mode.costType,
+			entryCost = mode.entryCost,
+			continueLimit = mode.continueLimit,
+			refundCoinOnClear = mode.refundCoinOnClear,
+			recordBestTime = mode.recordBestTime,
+		}
+	end
+
+	method table GetTheme(string themeId)
+		-- Theme display row as a copy. nil for unknown themes.
+		self:EnsureCatalog()
+		local theme = self.themes[themeId]
+		if theme == nil then
+			return nil
+		end
+		return { themeId = theme.themeId, name = theme.name }
+	end
+
+end

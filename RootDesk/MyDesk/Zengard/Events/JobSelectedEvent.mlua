@@ -1,0 +1,8 @@
+@Event
+script JobSelectedEvent extends EventType
+
+	property string userId = ""
+
+	property string jobId = ""
+
+end

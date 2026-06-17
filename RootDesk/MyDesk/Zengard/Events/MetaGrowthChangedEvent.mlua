@@ -1,0 +1,10 @@
+@Event
+script MetaGrowthChangedEvent extends EventType
+
+	property string userId = ""
+
+	property string changeKind = ""
+
+	property string targetKey = ""
+
+end

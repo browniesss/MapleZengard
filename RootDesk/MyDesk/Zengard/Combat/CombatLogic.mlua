@@ -1,0 +1,572 @@
+@Logic
+script CombatLogic extends Logic
+
+	property any combatUnits = nil
+
+	property any combatConfigs = nil
+
+	property any statMulCache = nil
+
+	property any castQueue = nil
+
+	property integer queueCursor = 0
+
+	property integer currentZenIndex = 0
+
+	property integer totalKills = 0
+
+	property integer sequenceTimerId = 0
+
+	property boolean processingSequence = false
+
+	property any equipGrantedHandler = nil
+
+	property any metaGrowthChangedHandler = nil
+
+	property any monsterEvolvedHandler = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Server-authoritative combat core: registry/config tables live server-side only.
+		self.combatUnits = {}
+		self.combatConfigs = {}
+		self.statMulCache = {}
+		self.castQueue = {}
+		self.equipGrantedHandler = _ZengardGameLogic:ConnectEvent(EquipmentGrantedEvent, self.OnEquipmentGranted)
+		self.metaGrowthChangedHandler = _ZengardGameLogic:ConnectEvent(MetaGrowthChangedEvent, self.OnMetaGrowthChanged)
+		self.monsterEvolvedHandler = _ZengardGameLogic:ConnectEvent(MonsterEvolvedEvent, self.OnMonsterEvolved)
+		log("[CombatLogic] OnBeginPlay")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Everything connected in OnBeginPlay is released here (msw-scripting §5).
+		if self.equipGrantedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(EquipmentGrantedEvent, self.equipGrantedHandler)
+			self.equipGrantedHandler = nil
+		end
+		if self.metaGrowthChangedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(MetaGrowthChangedEvent, self.metaGrowthChangedHandler)
+			self.metaGrowthChangedHandler = nil
+		end
+		if self.monsterEvolvedHandler ~= nil then
+			_ZengardGameLogic:DisconnectEvent(MonsterEvolvedEvent, self.monsterEvolvedHandler)
+			self.monsterEvolvedHandler = nil
+		end
+		if self.sequenceTimerId ~= 0 then
+			_TimerService:ClearTimer(self.sequenceTimerId)
+			self.sequenceTimerId = 0
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEquipmentGranted(EquipmentGrantedEvent event)
+		-- Equip/meta multipliers are cached per user; new equipment invalidates the cache (MASTER_PLAN §3).
+		self.statMulCache[event.userId] = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMetaGrowthChanged(any event)
+		-- Meta-growth upgrades change cached combat multipliers; invalidate immediately.
+		self.statMulCache[event.userId] = nil
+		log("[CombatLogic] stat cache invalidated by meta growth: user=" .. event.userId .. " kind=" .. event.changeKind .. " target=" .. event.targetKey)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMonsterEvolved(MonsterEvolvedEvent event)
+		-- A manual target pointing at the pre-evolution monster is no longer attackable (MASTER_PLAN §3).
+		for _, cfg in pairs(self.combatConfigs) do
+			if cfg.targetMonsterId == event.oldMonsterId then
+				cfg.targetMonsterId = ""
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RegisterCombatUnit(Entity unit, string ownerId)
+		-- ownerId is a userId for the main character or a companionId (C-13).
+		local isCompanion = (_UserService:GetUserEntityByUserId(ownerId) == nil)
+		self.combatUnits[ownerId] = { entity = unit, ownerId = ownerId, isCompanion = isCompanion }
+		log("[CombatLogic] combat unit registered: " .. ownerId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UnregisterCombatUnit(string ownerId)
+		-- Removal applies from the next zen — a running sequence keeps its snapshot (E-8).
+		self.combatUnits[ownerId] = nil
+		self.combatConfigs[ownerId] = nil
+		log("[CombatLogic] combat unit unregistered: " .. ownerId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetCombatConfig(string ownerId, string mode, string direction, table skillOrder, string targetMonsterId)
+		-- senderUserId guard: own unit always, companions only when the sender owns the run
+		-- (single-run prototype: any registered companion belongs to the requesting player, E-13).
+		if ownerId ~= senderUserId then
+			local unit = self.combatUnits[ownerId]
+			if unit == nil or not unit.isCompanion then
+				log_warning("[CombatLogic] RequestSetCombatConfig rejected: " .. tostring(ownerId) .. " not owned by " .. tostring(senderUserId))
+				return
+			end
+		end
+		if not _CombatConfig:IsValidMode(mode) or not _CombatConfig:IsValidDirection(direction) then
+			log_warning("[CombatLogic] RequestSetCombatConfig rejected: invalid mode/direction " .. tostring(mode) .. "/" .. tostring(direction))
+			return
+		end
+		local cfg = self:GetOrCreateConfig(ownerId)
+		cfg.mode = mode
+		cfg.direction = direction
+		if targetMonsterId == nil then
+			cfg.targetMonsterId = ""
+		else
+			cfg.targetMonsterId = targetMonsterId
+		end
+		if skillOrder ~= nil and #skillOrder > 0 then
+			_SkillInventoryLogic:SetSkillOrder(ownerId, skillOrder)
+		end
+		log("[CombatLogic] RequestSetCombatConfig: owner=" .. ownerId .. " mode=" .. mode .. " direction=" .. direction)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsProcessingSequence()
+		-- Server-side query for WaveLogic.RequestZen: a new zen must not start while the previous zen's
+		-- timer-driven combat sequence is still running, or its combat gets dropped by the re-entry guard
+		-- in ExecuteZenCombat (the 1.0s zen cooldown is shorter than a full sequence).
+		return self.processingSequence
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ExecuteZenCombat(integer zenIndex)
+		-- Timer-chain sequence instead of long wait(): the server Logic must not block (§10-4).
+		if self.processingSequence then
+			log_warning("[CombatLogic] zen combat re-entry blocked: zen=" .. tostring(zenIndex))
+			return
+		end
+		self.processingSequence = true
+		self.currentZenIndex = zenIndex
+		self.totalKills = 0
+		self:EnsurePlayerUnits()
+		self.castQueue = self:BuildCastQueue()
+		self.queueCursor = 0
+		log("[CombatLogic] attack sequence started: zen=" .. tostring(zenIndex) .. " casts=" .. tostring(#self.castQueue))
+		local ev = AttackSequenceStartedEvent()
+		ev.zenIndex = zenIndex
+		_ZengardGameLogic:SendGameEvent(ev)
+		self.sequenceTimerId = _TimerService:SetTimerOnce(self.StepCastQueue, _CombatConfig.SEQUENCE_START_DELAY)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnsurePlayerUnits()
+		-- No other system registers the player's board piece, so users with a job are picked up lazily
+		-- (C-10 guarantees the job is set during StartStage). Invalid entities are pruned here too.
+		for ownerId, unit in pairs(self.combatUnits) do
+			if not isvalid(unit.entity) then
+				self.combatUnits[ownerId] = nil
+			end
+		end
+		for _, userId in ipairs(_UserService.UserEntities.Keys) do
+			local userEntity = _UserService:GetUserEntityByUserId(userId)
+			if isvalid(userEntity) and self.combatUnits[userId] == nil and _JobLogic:GetJob(userId) ~= "" then
+				self.combatUnits[userId] = { entity = userEntity, ownerId = userId, isCompanion = false }
+				log("[CombatLogic] combat unit registered: " .. userId)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildCastQueue()
+		-- Units and skill orders are snapshotted up front (E-8/E-9):
+		-- main characters first, then companions in companionId ascending order (C-13 determinism).
+		local players = {}
+		local companions = {}
+		for ownerId, unit in pairs(self.combatUnits) do
+			if isvalid(unit.entity) then
+				if unit.isCompanion then
+					table.insert(companions, ownerId)
+				else
+					table.insert(players, ownerId)
+				end
+			end
+		end
+		table.sort(players)
+		table.sort(companions)
+		local ordered = {}
+		for _, ownerId in ipairs(players) do
+			table.insert(ordered, ownerId)
+		end
+		for _, ownerId in ipairs(companions) do
+			table.insert(ordered, ownerId)
+		end
+		local queue = {}
+		for _, ownerId in ipairs(ordered) do
+			local unit = self.combatUnits[ownerId]
+			if not unit.isCompanion and _JobLogic:GetJob(ownerId) == "" then
+				-- E-11: jobless unit cannot resolve a pattern; skipped instead of aborting so other units still act.
+				log_warning("[CombatLogic] job not selected, unit skipped: " .. ownerId)
+				continue
+			end
+			local cfg = self:GetOrCreateConfig(ownerId)
+			local skillIds = {}
+			local order = _SkillInventoryLogic:GetSkillOrder(ownerId)
+			if order ~= nil then
+				for _, skillId in ipairs(order) do
+					local skillData = _SkillDataLogic:GetSkillData(skillId)
+					if skillData ~= nil and skillData.shape ~= "PASSIVE" then
+						table.insert(skillIds, skillId)
+					end
+				end
+			end
+			if cfg.mode == "AUTO" then
+				-- D-10: AUTO shuffles once per sequence, not per cast.
+				self:ShuffleInPlace(skillIds)
+			end
+			for _, skillId in ipairs(skillIds) do
+				table.insert(queue, { ownerId = ownerId, skillId = skillId, isExtra = false })
+			end
+		end
+		return queue
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StepCastQueue()
+		-- One cast per tick, chained via timer so the server stays responsive between casts.
+		self.queueCursor += 1
+		local entry = self.castQueue[self.queueCursor]
+		if entry == nil then
+			self.sequenceTimerId = _TimerService:SetTimerOnce(self.FinishSequence, _CombatConfig.HIT_FX_DURATION)
+			return
+		end
+		self:CastSkill(entry)
+		self.sequenceTimerId = _TimerService:SetTimerOnce(self.StepCastQueue, self:ResolveCastInterval(entry.ownerId))
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ResolveCastInterval(string ownerId)
+		-- atkSpeed +N% means the owner's next cast comes N% sooner: interval = CAST_INTERVAL / (1 + atkSpeedMul).
+		-- Clamp the divisor above zero so a malformed/negative multiplier can never stall or invert the chain.
+		local unit = self.combatUnits[ownerId]
+		local isCompanion = (unit ~= nil and unit.isCompanion)
+		local stats = self:GetStatBundle(ownerId, isCompanion)
+		local speedFactor = 1 + (stats.atkSpeedMul or 0)
+		if speedFactor < 0.1 then
+			speedFactor = 0.1
+		end
+		return _CombatConfig.CAST_INTERVAL / speedFactor
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinishSequence()
+		-- WaveLogic re-syncs MonsterCount on this event (MASTER_PLAN §1.2-9).
+		self.processingSequence = false
+		self.sequenceTimerId = 0
+		log("[CombatLogic] attack sequence ended: zen=" .. tostring(self.currentZenIndex) .. " totalKills=" .. tostring(self.totalKills))
+		local ev = AttackSequenceEndedEvent()
+		ev.zenIndex = self.currentZenIndex
+		ev.totalKills = self.totalKills
+		_ZengardGameLogic:SendGameEvent(ev)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table ResolveCasterCell(string ownerId, table unit)
+		-- The placed cell is the authority, not the live WorldPosition: a board piece carrying a Body has
+		-- its Transform overwritten by physics next frame, so WorldToCell(WorldPosition) drifts off the
+		-- placed cell and casts target the wrong cells (targets=0). Players store their cell in
+		-- WaveLogic.playerCells (keyed by entity Id); companions store col/row on CompanionLogic.roster.
+		-- WorldToCell is only the last-resort fallback for an unregistered/desync-free unit.
+		if unit.isCompanion then
+			local roster = _CompanionLogic.roster
+			local record = roster ~= nil and roster[ownerId] or nil
+			if record ~= nil and record.placed and record.col ~= nil and record.row ~= nil then
+				return { col = record.col, row = record.row }
+			end
+		elseif isvalid(unit.entity) then
+			local playerCells = _WaveLogic.playerCells
+			local placed = playerCells ~= nil and playerCells[unit.entity.Id] or nil
+			if placed ~= nil and placed.col ~= nil and placed.row ~= nil then
+				return { col = placed.col, row = placed.row }
+			end
+		end
+		if not isvalid(unit.entity) then
+			return nil
+		end
+		return _BoardLogic:WorldToCell(unit.entity.TransformComponent.WorldPosition)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CastSkill(table entry)
+		-- Executes a single queued cast; dead/invalid casters are skipped silently (snapshot may be stale).
+		local unit = self.combatUnits[entry.ownerId]
+		if unit == nil or not isvalid(unit.entity) then
+			return
+		end
+		local skillData = _SkillDataLogic:GetSkillData(entry.skillId)
+		if skillData == nil or skillData.shape == "PASSIVE" then
+			return
+		end
+		local cell = self:ResolveCasterCell(entry.ownerId, unit)
+		if cell == nil then
+			log_warning("[CombatLogic] unit off board, cast skipped: " .. entry.ownerId)
+			return
+		end
+		local cfg = self:GetOrCreateConfig(entry.ownerId)
+		local direction = self:ResolveDirection(cfg)
+		local stats = self:GetStatBundle(entry.ownerId, unit.isCompanion)
+		local targets = self:ResolveTargets(entry.skillId, skillData, cell, direction, cfg, stats)
+		if skillData.shape == "RANGED_TARGET" and #targets == 0 then
+			-- E-4: targeted skill with no candidate skips cast FX entirely.
+			log("[CombatLogic] cast skipped (no target in range): owner=" .. entry.ownerId .. " skill=" .. entry.skillId)
+			return
+		end
+		-- Turn the caster toward what it is actually hitting: face the first target's column when
+		-- there is one (so ranged/auto-target skills read correctly), else face the chosen direction.
+		local faceCol = cell.col
+		if #targets > 0 then
+			local finfo = _MonsterLogic:GetMonsterInfo(targets[1])
+			if finfo ~= nil then
+				faceCol = finfo.col
+			end
+		end
+		if faceCol == cell.col then
+			if direction == "LEFT" then
+				faceCol = cell.col - 1
+			elseif direction == "RIGHT" then
+				faceCol = cell.col + 1
+			end
+		end
+		-- Flip the caster toward the target on the SERVER: the board-fit scale is set server-side and
+		-- synced, so a client-side facing write is overwritten. Mirroring scale.x is controller-independent
+		-- (the board piece's PlayerControllerComponent is disabled, so LookDirectionX does not apply).
+		if faceCol ~= cell.col then
+			local casterTc = unit.entity.TransformComponent
+			local sc = casterTc.Scale
+			local sign = 1
+			if faceCol < cell.col then
+				sign = -1
+			end
+			casterTc.Scale = Vector3(sign * math.abs(sc.x), sc.y, sc.z)
+		end
+		_CombatFxLogic:PlayCastFx(entry.skillId, cell.col, cell.row, direction)
+		-- Ranged/targeted skills (RANGED_TARGET: magic claw, double stab, lucky seven) land ON the
+		-- monster, so play the skill burst at each target cell — otherwise the effect only appears at
+		-- the caster's feet and reads as "the effect is in the wrong place".
+		if skillData.shape == "RANGED_TARGET" then
+			for _, targetId in ipairs(targets) do
+				local tinfo = _MonsterLogic:GetMonsterInfo(targetId)
+				if tinfo ~= nil then
+					_CombatFxLogic:PlayImpactFx(entry.skillId, tinfo.col, tinfo.row)
+				end
+			end
+		end
+		log("[CombatLogic] cast skill: owner=" .. entry.ownerId .. " skill=" .. entry.skillId .. " direction=" .. direction .. " targets=" .. tostring(#targets))
+		local kills = 0
+		for _, monsterId in ipairs(targets) do
+			kills += self:ApplySkillHits(entry.ownerId, entry.skillId, monsterId, skillData, stats)
+		end
+		self.totalKills += kills
+		if not entry.isExtra and _SkillStatLogic:RollExtraAction(entry.ownerId) then
+			-- §1.4: nimble body grants one extra cast; the extra cast never re-rolls.
+			table.insert(self.castQueue, self.queueCursor + 1, { ownerId = entry.ownerId, skillId = entry.skillId, isExtra = true })
+			log("[CombatLogic] extra action: owner=" .. entry.ownerId .. " skill=" .. entry.skillId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table ResolveTargets(string skillId, table skillData, table cell, string direction, table cfg, table stats)
+		-- Returns an ordered monsterId list; dedupe by monsterId covers multi-cell occupants (E-6).
+		local targets = {}
+		local shape = skillData.shape
+		if shape == "RANGED_TARGET" then
+			local range = (skillData.range or 0) + stats.rangeAdd
+			local maxTargets = 1 + stats.targetAdd
+			local alive = _MonsterLogic:GetAliveMonsters()
+			local candidates = {}
+			for _, m in ipairs(alive) do
+				if _AttackPatternLogic:IsInRange(cell.col, cell.row, m.col, m.row, range) then
+					table.insert(candidates, m)
+				end
+			end
+			local fallbackNearest = false
+			if #candidates == 0 then
+				-- The player is randomly repositioned every zen with no control over placement, so a
+				-- RANGED_TARGET skill that finds nothing in range turns the whole zen into a silent no-op
+				-- (measured ~39% of early-game zens for magic_claw r3 / ~60% for double_stab r2 with one
+				-- monster). That reads as "I pressed zen and nothing happened" (user bug report). Guarantee
+				-- the core press-zen->attack loop by falling back to the single nearest monster on the board.
+				-- Range still governs multi-target selection (maxTargets) whenever a monster IS in range;
+				-- this deliberately overrides the old E-4 "skip the cast entirely" rule.
+				if #alive == 0 then
+					return targets
+				end
+				for _, m in ipairs(alive) do
+					table.insert(candidates, m)
+				end
+				fallbackNearest = true
+			end
+			-- D-11: RANGED_TARGET always targets nearest-first deterministically
+			-- (Chebyshev distance, monsterId tiebreak) for both MANUAL and AUTO.
+			-- AUTO must NOT pick randomly; only directional skills randomize direction.
+			table.sort(candidates, function(a, b)
+				local da = math.max(math.abs(a.col - cell.col), math.abs(a.row - cell.row))
+				local db = math.max(math.abs(b.col - cell.col), math.abs(b.row - cell.row))
+				if da == db then
+					return a.monsterId < b.monsterId
+				end
+				return da < db
+			end)
+			if fallbackNearest then
+				-- Out-of-range fallback grants exactly the closest monster (sorted first above), ignoring
+				-- maxTargets and any MANUAL designation: it is a guaranteed single shot at the nearest enemy.
+				for _, m in ipairs(candidates) do
+					table.insert(targets, m.monsterId)
+					break
+				end
+				return targets
+			end
+			local picked = {}
+			if cfg.mode == "MANUAL" and cfg.targetMonsterId ~= "" then
+				-- D-11: MANUAL designated target wins the first slot; AUTO has no designation.
+				for _, m in ipairs(candidates) do
+					if m.monsterId == cfg.targetMonsterId then
+						table.insert(targets, m.monsterId)
+						picked[m.monsterId] = true
+						break
+					end
+				end
+			end
+			for _, m in ipairs(candidates) do
+				if #targets >= maxTargets then
+					break
+				end
+				if picked[m.monsterId] == nil then
+					table.insert(targets, m.monsterId)
+					picked[m.monsterId] = true
+				end
+			end
+		elseif shape == "ADJACENT4_SINGLE" then
+			local maxTargets = 1 + stats.targetAdd
+			local cells = _AttackPatternLogic:ResolveSkillCells(skillId, cell.col, cell.row, direction)
+			local found = self:CollectMonstersInCells(cells, false)
+			if cfg.mode == "AUTO" then
+				self:ShuffleInPlace(found)
+			end
+			while #found > maxTargets do
+				table.remove(found)
+			end
+			targets = found
+		elseif shape == "LINE" then
+			local cells = _AttackPatternLogic:ResolveSkillCells(skillId, cell.col, cell.row, direction)
+			-- Non-pierce LINE stops at the first monster on the path (C-12 linePierce flag).
+			targets = self:CollectMonstersInCells(cells, skillData.linePierce ~= true)
+		else
+			local cells = _AttackPatternLogic:ResolveSkillCells(skillId, cell.col, cell.row, direction)
+			targets = self:CollectMonstersInCells(cells, false)
+		end
+		return targets
+	end
+
+	@ExecSpace("ServerOnly")
+	method table CollectMonstersInCells(table cells, boolean stopAtFirst)
+		-- Cell order is preserved; the seen-set dedupes a monster occupying multiple resolved cells (E-6).
+		local found = {}
+		local seen = {}
+		for _, c in ipairs(cells) do
+			local m = _MonsterLogic:GetMonsterAt(c.col, c.row)
+			if m ~= nil and seen[m.monsterId] == nil then
+				seen[m.monsterId] = true
+				table.insert(found, m.monsterId)
+				if stopAtFirst then
+					break
+				end
+			end
+		end
+		return found
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ApplySkillHits(string ownerId, string skillId, string monsterId, table skillData, table stats)
+		-- Applies per-hit damage via the single damage authority (C-17); returns 1 when this cast killed the target.
+		local hits = skillData.hits or 1
+		for i = 1, hits do
+			local info = _MonsterLogic:GetMonsterInfo(monsterId)
+			if info == nil or info.hp <= 0 then
+				-- E-2/E-3: died mid-cast (earlier hit or another unit) — stop hitting.
+				return self:KilledThisCast(i)
+			end
+			local hit = _SkillStatLogic:ComputeHitDamage(ownerId, skillId, stats.critChanceAdd)
+			local final = math.floor(hit.damage * (1 + stats.damageMul))
+			_MonsterLogic:ApplyDamage(monsterId, final, ownerId)
+			_CombatFxLogic:PlayHitFx(skillId, info.col, info.row)
+			_CombatFxLogic:PlayDamageSkin(info.col, info.row, final, hit.isCritical)
+		end
+		local after = _MonsterLogic:GetMonsterInfo(monsterId)
+		if after == nil or after.hp <= 0 then
+			return 1
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer KilledThisCast(integer hitIndex)
+		-- Death found before the first hit means another cast killed it — not this cast's kill.
+		if hitIndex > 1 then
+			return 1
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetStatBundle(string ownerId, boolean isCompanion)
+		-- §1.4: companions get zero equip/meta multipliers and no extra crit (C-13 / D5).
+		if isCompanion then
+			return { damageMul = 0, critChanceAdd = 0, rangeAdd = 0, targetAdd = 0, atkSpeedMul = 0 }
+		end
+		local cached = self.statMulCache[ownerId]
+		if cached ~= nil then
+			return cached
+		end
+		local equip = _EquipmentLogic:GetEquipStatMultipliers(ownerId)
+		local growth = _MetaGrowthLogic:GetGrowthMultipliers(ownerId)
+		local bundle = {
+			damageMul = (equip.atkMul or 0) + (equip.skillDmgMul or 0) + (growth.atkMul or 0),
+			critChanceAdd = equip.critChanceAdd or 0,
+			rangeAdd = equip.rangeAdd or 0,
+			targetAdd = equip.targetAdd or 0,
+			atkSpeedMul = (equip.atkSpeedMul or 0) + (growth.atkSpeedMul or 0),
+		}
+		self.statMulCache[ownerId] = bundle
+		return bundle
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetOrCreateConfig(string ownerId)
+		-- Lazy defaults keep an unset unit castable: MANUAL + RIGHT (D-8/D-9).
+		local cfg = self.combatConfigs[ownerId]
+		if cfg == nil then
+			cfg = { mode = _CombatConfig.DEFAULT_COMBAT_MODE, direction = _CombatConfig.DEFAULT_DIRECTION, targetMonsterId = "" }
+			self.combatConfigs[ownerId] = cfg
+		end
+		return cfg
+	end
+
+	@ExecSpace("ServerOnly")
+	method string ResolveDirection(table cfg)
+		-- AUTO mode (or stored "RANDOM") re-rolls direction on every cast (R9).
+		if cfg.mode == "AUTO" or cfg.direction == "RANDOM" then
+			local dirs = _CombatConfig:GetDirections()
+			return dirs[_UtilLogic:RandomIntegerRange(1, #dirs)]
+		end
+		return cfg.direction
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShuffleInPlace(table list)
+		-- Fisher-Yates with server-authoritative randomness.
+		for i = #list, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			local tmp = list[i]
+			list[i] = list[j]
+			list[j] = tmp
+		end
+	end
+
+end

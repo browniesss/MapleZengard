@@ -1,0 +1,11 @@
+@Event
+script RerollUsedEvent extends EventType
+
+	property string userId = ""
+
+	-- "placement" | "choice" (MASTER_PLAN §3)
+	property string kind = ""
+
+	property integer remaining = 0
+
+end

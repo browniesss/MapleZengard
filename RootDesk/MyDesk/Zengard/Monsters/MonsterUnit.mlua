@@ -1,0 +1,146 @@
+@Component
+script MonsterUnit extends Component
+
+	-- Display-only component (C-8/C-17): HP bar delegation + dissolve. No game judgement here.
+
+	@Sync
+	property number Hp = 0
+
+	@Sync
+	property number MaxHp = 0
+
+	@Sync
+	property boolean IsDead = false
+
+	@Sync
+	property boolean IsBoss = false
+
+	property boolean clientReady = false
+
+	property boolean hpBarAttached = false
+
+	property string dissolveMode = ""
+
+	property number dissolveElapsed = 0
+
+	method void OnUpdate(number delta)
+		-- Client lazy init: synced values arrive after dynamic spawn, so OnBeginPlay init is unreliable.
+		if not self:IsClient() then
+			return
+		end
+		if not self.clientReady then
+			if self.MaxHp <= 0 then
+				return
+			end
+			self.clientReady = true
+			self:BeginDissolve("in")
+			self:AttachHpBar()
+			if self.IsDead then
+				-- Killed before the client finished init: run the death path immediately.
+				self:HandleDead()
+			end
+		end
+		self:TickDissolve(delta)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- Mirrors server HP/death state into the HP bar manager and dissolve FX.
+		if not self.clientReady then
+			return
+		end
+		if name == "Hp" then
+			if self.hpBarAttached then
+				_UIHpBarManagerLogic:UpdateHp(self.Entity, self.Hp)
+			end
+		elseif name == "IsBoss" then
+			-- Late IsBoss: if a normal bar was already attached (MaxHp synced before IsBoss),
+			-- swap it for the dedicated boss bar so a real boss never keeps the pooled bar.
+			if self.IsBoss and self.hpBarAttached then
+				_UIHpBarManagerLogic:Release(self.Entity)
+				_UIHpBarManagerLogic:AttachBoss(self.Entity, self.MaxHp)
+				_UIHpBarManagerLogic:UpdateHp(self.Entity, self.Hp)
+			end
+		elseif name == "IsDead" then
+			if self.IsDead then
+				self:HandleDead()
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AttachHpBar()
+		-- Boss uses the dedicated boss bar slot (C-8).
+		if self.IsBoss then
+			_UIHpBarManagerLogic:AttachBoss(self.Entity, self.MaxHp)
+		else
+			_UIHpBarManagerLogic:Attach(self.Entity, self.MaxHp)
+		end
+		self.hpBarAttached = true
+		_UIHpBarManagerLogic:UpdateHp(self.Entity, self.Hp)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HandleDead()
+		-- Death presentation: release the pooled bar and play the out-dissolve.
+		if self.hpBarAttached then
+			_UIHpBarManagerLogic:Release(self.Entity)
+			self.hpBarAttached = false
+		end
+		self:BeginDissolve("out")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BeginDissolve(string mode)
+		-- Color-alpha tween fallback for the dissolve direction ("in" = appear, "out" = death).
+		self.dissolveMode = mode
+		self.dissolveElapsed = 0
+		if mode == "in" then
+			self:SetSpriteAlpha(0)
+		else
+			self:SetSpriteAlpha(1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickDissolve(number delta)
+		-- Advances the active dissolve tween each client frame.
+		if self.dissolveMode == "" then
+			return
+		end
+		self.dissolveElapsed = self.dissolveElapsed + delta
+		local duration = _MonsterBalance.DISSOLVE_DURATION
+		local progress = 1
+		if duration > 0 then
+			progress = math.min(1, self.dissolveElapsed / duration)
+		end
+		if self.dissolveMode == "in" then
+			self:SetSpriteAlpha(progress)
+		else
+			self:SetSpriteAlpha(1 - progress)
+		end
+		if progress >= 1 then
+			self.dissolveMode = ""
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetSpriteAlpha(number alpha)
+		-- Writes only the alpha channel, preserving any tint on the sprite.
+		local renderer = self.Entity.SpriteRendererComponent
+		if not isvalid(renderer) then
+			return
+		end
+		local c = renderer.Color
+		renderer.Color = Color(c.r, c.g, c.b, alpha)
+	end
+
+	method void OnEndPlay()
+		-- Releases the pooled bar even when destroyed without an IsDead sync (e.g. stage reset).
+		if self:IsClient() and self.hpBarAttached then
+			_UIHpBarManagerLogic:Release(self.Entity)
+			self.hpBarAttached = false
+		end
+	end
+
+end
