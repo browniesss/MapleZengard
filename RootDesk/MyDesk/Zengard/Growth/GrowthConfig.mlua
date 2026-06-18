@@ -53,6 +53,8 @@ script GrowthConfig extends Logic
 			{ id = "supply_loot_cache", name = "전리품 상자", desc = "전리품 +2. 전직과 선택지 확장 타이밍을 앞당깁니다.", iconRuid = "ab37d9c03a2648468678e79ad7519326", grade = "RARE", effect = "LOOT", amount = 2 },
 			{ id = "supply_reroll_ticket", name = "리롤 티켓", desc = "리롤 +1. 다음 선택지를 다시 굴릴 여유를 얻습니다.", iconRuid = "thumbnail://4987142bef4b484298eb29c6f64b2f1e", grade = "RARE", effect = "REROLL", amount = 1 },
 			{ id = "supply_training_manual", name = "수련의 비급", desc = "보유 스킬 하나를 무작위로 즉시 강화합니다.", iconRuid = "thumbnail://3cbc64d1f8564aeaa7585dc2e4699b3b", grade = "EPIC", effect = "RANDOM_SKILL_LEVELUP", amount = 1 },
+			{ id = "supply_red_meso_shard", name = "붉은 메소 조각", desc = "레드 메소 +1. 시연 중에도 프리미엄 보상 루프를 체감합니다.", iconRuid = "thumbnail://eb0aa9cfb347480db301d352b9955ddb", grade = "RARE", effect = "RED_MESO", amount = 1 },
+			{ id = "supply_challenge_coin", name = "도전자의 증표", desc = "도전 코인 +1. 다음 챌린지 진입 여유를 확보합니다.", iconRuid = "thumbnail://754fc2f3e27d4917a3d3b1d9a599289d", grade = "EPIC", effect = "CHALLENGE_COIN", amount = 1 },
 			{ id = "supply_meso_cache", name = "메소 주머니", desc = "메소 +30. 메타 성장 재화를 조금 더 확보합니다.", iconRuid = "02a489cccff24a139a6c3582a5871f58", grade = "NORMAL", effect = "MESO", amount = 30 },
 		}
 	end

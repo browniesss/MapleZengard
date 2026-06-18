@@ -787,6 +787,10 @@ script GrowthLogic extends Logic
 					self:GrantRerollUtilityReward(userId, utility.amount or 1)
 				elseif utility.effect == "RANDOM_SKILL_LEVELUP" then
 					self:GrantRandomSkillLevelUp(userId)
+				elseif utility.effect == "RED_MESO" then
+					_PlayerDataLogic:AddCurrency(userId, "redMeso", utility.amount or 1)
+				elseif utility.effect == "CHALLENGE_COIN" then
+					_PlayerDataLogic:AddChallengeCoin(userId, utility.amount or 1)
 				elseif utility.effect == "MESO" then
 					_PlayerDataLogic:AddCurrency(userId, "meso", utility.amount or _GrowthConfig.FILLER_MESO_AMOUNT)
 				else

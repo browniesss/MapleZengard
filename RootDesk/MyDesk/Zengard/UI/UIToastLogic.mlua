@@ -31,6 +31,7 @@ script UIToastLogic extends Logic
 		self:SubscribeGameEvent(ZenStartedEvent, self.OnZenStarted)
 		self:SubscribeGameEvent(FusionActivatedEvent, self.OnFusionActivated)
 		self:SubscribeGameEvent(SkillFusedEvent, self.OnSkillFused)
+		self:SubscribeGameEvent(ChoiceResolvedEvent, self.OnChoiceResolved)
 	end
 
 	method void OnUpdate(number delta)
@@ -137,6 +138,48 @@ script UIToastLogic extends Logic
 	method void OnSkillFused(SkillFusedEvent event)
 		-- Fusion completion notice (§3: SkillFusedEvent → UIToastLogic).
 		self:ShowMessage("스킬 합성 완료!")
+	end
+
+	method void OnChoiceResolved(ChoiceResolvedEvent event)
+		-- Shows immediate positive feedback after a choice card resolves.
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or localPlayer.PlayerComponent.UserId ~= event.userId then
+			return
+		end
+		local msg = self:BuildChoiceResolvedToast(event.kind, event.id)
+		if msg ~= "" then
+			self:ShowMessage(msg)
+		end
+	end
+
+	method string BuildChoiceResolvedToast(string kind, string id)
+		-- Converts internal choice ids to player-facing reward copy.
+		if kind == "SKILL" or kind == "FUSION" then
+			local skill = _SkillDataLogic:GetSkillData(id)
+			if skill ~= nil and skill.displayName ~= nil then
+				if kind == "FUSION" then
+					return "합성 스킬 획득: " .. skill.displayName
+				end
+				return "스킬 보상: " .. skill.displayName
+			end
+			return "스킬 보상을 획득했습니다."
+		elseif kind == "EQUIP" then
+			local equip = _EquipmentBalance:GetCard(id)
+			if equip ~= nil and equip.name ~= nil then
+				return "장비 획득: " .. equip.name
+			end
+			return "장비를 획득했습니다."
+		elseif kind == "UTILITY" then
+			for _, utility in ipairs(_GrowthConfig:GetUtilityCardPool()) do
+				if utility.id == id then
+					return "보급 획득: " .. utility.name
+				end
+			end
+			return "보급 보상을 획득했습니다."
+		elseif kind == "FILLER" then
+			return "메소 보너스를 획득했습니다."
+		end
+		return ""
 	end
 
 end
