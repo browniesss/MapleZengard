@@ -785,6 +785,8 @@ script GrowthLogic extends Logic
 					_LootLogic:AddLoot(userId, utility.amount or 1, "utility_card")
 				elseif utility.effect == "REROLL" then
 					self:GrantRerollUtilityReward(userId, utility.amount or 1)
+				elseif utility.effect == "RANDOM_SKILL_LEVELUP" then
+					self:GrantRandomSkillLevelUp(userId)
 				elseif utility.effect == "MESO" then
 					_PlayerDataLogic:AddCurrency(userId, "meso", utility.amount or _GrowthConfig.FILLER_MESO_AMOUNT)
 				else
@@ -817,6 +819,28 @@ script GrowthLogic extends Logic
 		_ZengardGameLogic:SendGameEvent(rerollEvent)
 		_PlayerDataLogic:QueuePush(userId)
 		log("[GrowthLogic] RerollUtilityReward user=" .. userId .. " +" .. tostring(amount) .. " remaining=" .. tostring(remaining))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantRandomSkillLevelUp(string userId)
+		-- Utility-card skill bump: creates a non-card build spike by upgrading one owned non-max skill.
+		local candidates = {}
+		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(userId)) do
+			if entry.level < _SkillDataLogic.SKILL_MAX_LEVEL then
+				table.insert(candidates, entry.skillId)
+			end
+		end
+		if #candidates == 0 then
+			log("[GrowthLogic] RandomSkillLevelUp fallback filler user=" .. userId)
+			self:GrantFillerReward(userId)
+			return
+		end
+		local skillId = candidates[_UtilLogic:RandomIntegerRange(1, #candidates)]
+		local ok = _SkillInventoryLogic:LevelUpSkill(userId, skillId)
+		log("[GrowthLogic] RandomSkillLevelUp user=" .. userId .. " skill=" .. skillId .. " ok=" .. tostring(ok))
+		if not ok then
+			self:GrantFillerReward(userId)
+		end
 	end
 
 	@ExecSpace("ServerOnly")
