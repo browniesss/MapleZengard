@@ -494,9 +494,12 @@ script CombatLogic extends Logic
 				-- E-2/E-3: died mid-cast (earlier hit or another unit) — stop hitting.
 				return self:KilledThisCast(i)
 			end
-			local hit = _SkillStatLogic:ComputeHitDamage(ownerId, skillId, stats.critChanceAdd)
+			local hit = _SkillStatLogic:ComputeHitDamage(ownerId, skillId, stats.critChanceAdd, info)
 			local followMul = extraDamageMul or 1.0
 			local final = math.floor(hit.damage * (1 + stats.damageMul) * followMul)
+			if hit.elementMultiplier ~= nil and hit.elementMultiplier ~= 1.0 then
+				log("[CombatLogic] elemental matchup: skill=" .. skillId .. " target=" .. info.typeId .. " mul=" .. tostring(hit.elementMultiplier) .. " tag=" .. tostring(hit.elementLabel))
+			end
 			_MonsterLogic:ApplyDamage(monsterId, final, ownerId)
 			_CombatFxLogic:PlayHitFx(skillId, info.col, info.row)
 			_CombatFxLogic:PlayDamageSkin(info.col, info.row, final, hit.isCritical)

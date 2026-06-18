@@ -651,6 +651,10 @@ script GrowthLogic extends Logic
 		if desc == "" then
 			desc = "새로운 스킬을 배웁니다."
 		end
+		local elementLabel = self:GetElementLabel(skillData)
+		if elementLabel ~= "" then
+			desc = "속성: " .. elementLabel .. " · " .. desc
+		end
 		local grade = "NORMAL"
 		local flash = false
 		if skillTier >= 3 then
@@ -679,6 +683,27 @@ script GrowthLogic extends Logic
 			skillName = "[동료 " .. candidate.ownerLabel .. "] " .. skillName
 		end
 		return { choiceId = candidate.skillId, kind = "SKILL", name = skillName, desc = desc, iconRuid = iconRuid, grade = grade, flash = flash }
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetElementLabel(table skillData)
+		-- Human-readable tag for elemental skill cards; empty for neutral/non-skill cards.
+		if skillData == nil then
+			return ""
+		end
+		local element = skillData.element or "NONE"
+		if element == "FIRE" then
+			return "불"
+		elseif element == "ICE" then
+			return "얼음"
+		elseif element == "LIGHTNING" then
+			return "번개"
+		elseif element == "POISON" then
+			return "독"
+		elseif element == "HOLY" then
+			return "성"
+		end
+		return ""
 	end
 
 	@ExecSpace("ServerOnly")

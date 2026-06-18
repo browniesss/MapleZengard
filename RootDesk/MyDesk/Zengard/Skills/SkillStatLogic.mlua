@@ -8,8 +8,8 @@ script SkillStatLogic extends Logic
 		log("[SkillStat] OnBeginPlay")
 	end
 
-	method table ComputeHitDamage(string ownerId, string skillId, number extraCritChance)
-		-- Single damage entry for one hit (§1.4): base + FLAT_DAMAGE passives, then crit roll.
+	method table ComputeHitDamage(string ownerId, string skillId, number extraCritChance, table monsterInfo)
+		-- Single damage entry for one hit (§1.4): base + passives + elemental matchup, then crit roll.
 		local data = _SkillDataLogic:GetSkillData(skillId)
 		if data == nil then
 			log_warning("[SkillStat] ComputeHitDamage: unknown skillId " .. tostring(skillId))
@@ -58,11 +58,73 @@ script SkillStatLogic extends Logic
 			damage = math.floor(damage * (1 + passiveDamageMul))
 		end
 
+		local elementProfile = self:ResolveElementProfile(data, monsterInfo)
+		if elementProfile.multiplier ~= nil and elementProfile.multiplier ~= 1.0 and damage > 0 then
+			local adjusted = damage * elementProfile.multiplier
+			if elementProfile.multiplier > 1.0 then
+				damage = math.ceil(adjusted)
+			else
+				damage = math.max(1, math.floor(adjusted))
+			end
+		end
+
 		local isCritical = _UtilLogic:RandomDouble() < critChance
 		if isCritical then
 			damage = math.floor(damage * _SkillDataLogic.CRIT_MULTIPLIER)
 		end
-		return { damage = damage, isCritical = isCritical }
+		return { damage = damage, isCritical = isCritical, elementMultiplier = elementProfile.multiplier, elementLabel = elementProfile.label }
+	end
+
+	method table ResolveElementProfile(table skillData, table monsterInfo)
+		-- Small matchup layer so elemental skills differ in combat, not only in visuals.
+		local profile = { multiplier = 1.0, label = "" }
+		if skillData == nil or monsterInfo == nil then
+			return profile
+		end
+		local element = skillData.element or "NONE"
+		if element == "NONE" or element == "" then
+			return profile
+		end
+		local typeId = monsterInfo.typeId or ""
+		if element == "FIRE" then
+			if typeId == "zombiemushroom" or typeId == "mushmom_split" then
+				profile.multiplier = 1.25
+				profile.label = "burn"
+			elseif typeId == "stonegolem" then
+				profile.multiplier = 0.90
+				profile.label = "resist"
+			end
+		elseif element == "ICE" then
+			if typeId == "orangemushroom" or typeId == "mushmom" then
+				profile.multiplier = 1.20
+				profile.label = "freeze"
+			elseif typeId == "zombiemushroom" then
+				profile.multiplier = 0.90
+				profile.label = "resist"
+			end
+		elseif element == "LIGHTNING" then
+			if typeId == "stonegolem" or typeId == "mushmom" then
+				profile.multiplier = 1.25
+				profile.label = "shock"
+			end
+		elseif element == "POISON" then
+			if typeId == "stonegolem" or typeId == "mushmom" then
+				profile.multiplier = 1.15
+				profile.label = "corrode"
+			elseif typeId == "zombiemushroom" then
+				profile.multiplier = 0.75
+				profile.label = "resist"
+			end
+		elseif element == "HOLY" then
+			if typeId == "zombiemushroom" or typeId == "mushmom_split" then
+				profile.multiplier = 1.35
+				profile.label = "purify"
+			elseif typeId == "mushmom" then
+				profile.multiplier = 1.15
+				profile.label = "purify"
+			end
+		end
+		return profile
 	end
 
 	method boolean RollExtraAction(string ownerId)
