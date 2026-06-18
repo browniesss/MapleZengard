@@ -229,6 +229,26 @@ script SkillDataLogic extends Logic
 			desc = "표창 3개를 던지는 합성 원거리기",
 			iconRuid = "33feb48a1807454384d50ed838c46f93" })
 
+		-- Advanced fusion results: late-run chase goals that combine tier-2/tier-3 identity skills.
+		addSkill({ skillId = "warrior_combo_rage", displayName = "콤보 분노", job = "warrior", kind = "FUSION",
+			jobTier = 3, shape = "ADJACENT4", range = 1, hits = 4, damagePerLv = { 4, 6, 8 }, critChanceBonus = 0.12,
+			desc = "분노의 광역성을 콤보의 연타로 이어 주변 4칸을 네 번 몰아칩니다.",
+			iconRuid = "thumbnail://3cbc64d1f8564aeaa7585dc2e4699b3b" })
+		addSkill({ skillId = "archer_bomb_rain", displayName = "폭풍 화살비", job = "archer", kind = "FUSION",
+			jobTier = 3, shape = "ADJACENT8", range = 1, hits = 3, damagePerLv = { 4, 5, 7 },
+			desc = "폭발 화살을 비처럼 떨어뜨려 주변 8칸을 세 번 덮칩니다.",
+			iconRuid = "thumbnail://90629b39611f4114847a8be888a0a80f" })
+		addSkill({ skillId = "mage_storm_spear", displayName = "스톰 스피어", job = "mage", kind = "FUSION",
+			jobTier = 3, shape = "LINE", range = 6, hits = 3, damagePerLv = { 5, 7, 10 },
+			element = "LIGHTNING", linePierce = true, directional = true, critChanceBonus = 0.12,
+			desc = "썬더 스피어를 번개 폭풍으로 증폭해 직선상의 적을 관통합니다.",
+			iconRuid = "thumbnail://e2b54efb47bc494192c039f3fd551b1a" })
+		addSkill({ skillId = "thief_shadow_assault", displayName = "섀도 어썰트", job = "thief", kind = "FUSION",
+			jobTier = 3, shape = "LINE", range = 5, hits = 5, damagePerLv = { 3, 4, 6 },
+			linePierce = true, directional = true, critChanceBonus = 0.15,
+			desc = "분신과 함께 그림자 돌진을 펼쳐 직선상의 적을 다섯 번 베어냅니다.",
+			iconRuid = "thumbnail://0612d7370796466099c39e79ec3050a7" })
+
 		-- Mage tier-2 branch skills (C-26) — gated by GrowthLogic jobTier/branch in SkillChoiceLogic.
 		addSkill({ skillId = "mage_fire_arrow", displayName = "파이어 애로우", job = "mage", kind = "ACTIVE",
 			jobTier = 2, advRoute = "firepoison", shape = "LINE", range = 7, hits = 1,
@@ -298,6 +318,14 @@ script SkillDataLogic extends Logic
 			materialA = "mage_energy_bolt", materialB = "mage_magic_claw", result = "mage_energy_claw" })
 		addRecipe({ recipeId = "recipe_thief_triple_seven", job = "thief",
 			materialA = "thief_lucky_seven", materialB = "thief_double_stab", result = "thief_triple_seven" })
+		addRecipe({ recipeId = "recipe_warrior_combo_rage", job = "warrior",
+			materialA = "warrior_rage", materialB = "warrior_combo_attack", result = "warrior_combo_rage" })
+		addRecipe({ recipeId = "recipe_archer_bomb_rain", job = "archer",
+			materialA = "archer_arrow_bomb", materialB = "archer_arrow_rain", result = "archer_bomb_rain" })
+		addRecipe({ recipeId = "recipe_mage_storm_spear", job = "mage",
+			materialA = "mage_thunder_bolt", materialB = "mage_thunder_spear", result = "mage_storm_spear" })
+		addRecipe({ recipeId = "recipe_thief_shadow_assault", job = "thief",
+			materialA = "thief_shadow_partner", materialB = "thief_assaulter", result = "thief_shadow_assault" })
 
 		self.recipeTable = recipes
 		self.recipeOrder = order

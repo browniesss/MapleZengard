@@ -59,6 +59,8 @@ script CombatFxLogic extends Logic
 			return "3caa4d96acd74517829aa166f10e8a28"
 		elseif fxKey == "warrior_power_blast" then
 			return "4987142bef4b484298eb29c6f64b2f1e"
+		elseif fxKey == "warrior_combo_rage" then
+			return "3cbc64d1f8564aeaa7585dc2e4699b3b"
 		-- Archer
 		elseif fxKey == "archer_arrow_blow" then
 			-- 애로우 블로우 (skill 3001004) ball clip — thumbnail-verified flying arrow.
@@ -79,6 +81,8 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "archer_double_ice_shot" then
 			-- Shares the Ice Shot ball clip (fusion).
 			return "b40d0b0bdce54010bfd3658e8549e073"
+		elseif fxKey == "archer_bomb_rain" then
+			return "90629b39611f4114847a8be888a0a80f"
 		-- Mage
 		elseif fxKey == "mage_energy_bolt" then
 			return "ba512e50ddad4231bd6093dd07afc00e"
@@ -105,6 +109,8 @@ script CombatFxLogic extends Logic
 			return "e86eef7f960146fea646300653347c2e"
 		elseif fxKey == "mage_poison_mist" then
 			return "b0d47a8948314a5ea04a00690d921fc3"
+		elseif fxKey == "mage_storm_spear" then
+			return "e2b54efb47bc494192c039f3fd551b1a"
 		-- Thief
 		elseif fxKey == "thief_double_stab" then
 			return "c13c85382144469daf33bf2c9bae7e5e"
@@ -120,6 +126,8 @@ script CombatFxLogic extends Logic
 			return "0612d7370796466099c39e79ec3050a7"
 		elseif fxKey == "thief_triple_seven" then
 			return "63af9dc845db4da2960172417b3eee5d"
+		elseif fxKey == "thief_shadow_assault" then
+			return "0612d7370796466099c39e79ec3050a7"
 		end
 		return ""
 	end
@@ -142,6 +150,7 @@ script CombatFxLogic extends Logic
 			["warrior_combo_attack"] = 0.75,
 			["warrior_dragon_roar"] = 0.7,
 			["warrior_power_blast"] = 0.6,
+			["warrior_combo_rage"] = 0.72,
 			["archer_arrow_blow"] = 1.3,
 			["archer_double_shot"] = 1.3,
 			["archer_arrow_bomb"] = 0.28,
@@ -150,6 +159,7 @@ script CombatFxLogic extends Logic
 			["archer_arrow_rain"] = 1.2,
 			["archer_ice_shot"] = 0.65,
 			["archer_double_ice_shot"] = 0.65,
+			["archer_bomb_rain"] = 1.15,
 			["mage_energy_bolt"] = 0.75,
 			["mage_magic_claw"] = 1.0,
 			["mage_energy_claw"] = 1.0,
@@ -161,6 +171,7 @@ script CombatFxLogic extends Logic
 			["mage_holy_symbol"] = 1.0,
 			["mage_shining_ray"] = 0.35,
 			["mage_poison_mist"] = 0.45,
+			["mage_storm_spear"] = 1.1,
 			["thief_double_stab"] = 0.6,
 			["thief_savage_blow"] = 0.75,
 			["thief_lucky_seven"] = 1.85,
@@ -168,6 +179,7 @@ script CombatFxLogic extends Logic
 			["thief_shadow_partner"] = 1.0,
 			["thief_assaulter"] = 0.85,
 			["thief_triple_seven"] = 1.25,
+			["thief_shadow_assault"] = 0.9,
 		}
 		local s = scaleByFxKey[fxKey]
 		if s ~= nil then
