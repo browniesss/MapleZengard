@@ -159,7 +159,15 @@ script EquipmentLogic extends Logic
 			self._T.mults[userId] = mults
 		end
 		for statKey, value in pairs(card.stats) do
-			mults[statKey] = mults[statKey] + value
+			if statKey == "extraActionDamageMul" then
+				if mults[statKey] <= 0 then
+					mults[statKey] = value
+				else
+					mults[statKey] = math.min(mults[statKey], value)
+				end
+			else
+				mults[statKey] = mults[statKey] + value
+			end
 		end
 		local ev = EquipmentGrantedEvent()
 		ev.userId = userId

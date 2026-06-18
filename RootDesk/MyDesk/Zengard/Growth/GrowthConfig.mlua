@@ -129,6 +129,10 @@ script GrowthConfig extends Logic
 			eq_precision_quiver = { name = "정밀 화살통", desc = "한 번에 더 많은 적을 노리고 치명타도 노립니다." },
 			eq_arcane_lens = { name = "아케인 렌즈", desc = "멀리 있는 적까지 주문 피해를 밀어 넣습니다." },
 			eq_boss_hunter_medal = { name = "보스 헌터 메달", desc = "공격력과 전리품 획득 기대값이 함께 증가합니다." },
+			eq_cursed_spear = { name = "저주받은 창", desc = "큰 공격력 대신 시전 속도를 일부 잃는 위험 보상 장비입니다." },
+			eq_spell_trace = { name = "주문서 조각", desc = "스킬 피해량과 전투 순환 속도를 고르게 올립니다." },
+			eq_hunter_mark = { name = "헌터의 표식", desc = "치명타와 전리품 기대값을 함께 끌어올립니다." },
+			eq_assassin_band = { name = "어쌔신 밴드", desc = "분신 행동을 더 자주 부르며 공격 속도도 올립니다." },
 		}
 		local display = displays[equipId]
 		if display == nil then
