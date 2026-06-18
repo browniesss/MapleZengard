@@ -103,18 +103,8 @@ script CombatFxLogic extends Logic
 			return "93f3cd96f3b1432693e5d2765d396338"
 		elseif fxKey == "mage_shining_ray" then
 			return "e86eef7f960146fea646300653347c2e"
-		elseif fxKey == "mage_meteor" then
-			return "9dadb8bef6954b6f9bcff0d2a581a938"
 		elseif fxKey == "mage_poison_mist" then
 			return "b0d47a8948314a5ea04a00690d921fc3"
-		elseif fxKey == "mage_chain_lightning" then
-			return "fa693d02e71841b2bf541bcdbdd84242"
-		elseif fxKey == "mage_blizzard" then
-			return "96b261657b0c4aa792bd6f3e7d6c6681"
-		elseif fxKey == "mage_heal" then
-			return "93f3cd96f3b1432693e5d2765d396338"
-		elseif fxKey == "mage_angel_ray" then
-			return "e86eef7f960146fea646300653347c2e"
 		-- Thief
 		elseif fxKey == "thief_double_stab" then
 			return "c13c85382144469daf33bf2c9bae7e5e"
@@ -138,10 +128,9 @@ script CombatFxLogic extends Logic
 		-- Per-skill uniform scale for the real effect clip, sized against the 0.8u (~80px) board cell.
 		-- Values come straight from DESIGN-FX-HANDOFF.md (§B init-scale column + §C outliers), so each
 		-- clip is sized to its own source-pixel dimensions instead of one coarse per-shape number. The
-		-- §C outliers are the clips that would otherwise overrun the board: meteor (300x257 -> 748x764),
-		-- chain lightning (1385x90 -> 1400x108 ultra-wide), angel ray (450x855 -> 756x896 ultra-tall),
-		-- poison mist / lucky seven (tiny frames that must be scaled UP), and power blast (445x262 ->
-		-- 604x284 wide). Unmapped fxKeys fall back
+		-- §C outliers are the clips that would otherwise overrun the board: poison mist / lucky seven
+		-- (tiny frames that must be scaled UP), and power blast (445x262 -> 604x284 wide).
+		-- Unmapped fxKeys fall back
 		-- to the magic-claw baseline (self.impactEffectScale). Single table lookup per Design §E.2.
 		-- Scales re-derived for the new clips' source pixel sizes (target ~fills the 0.8u/~80px cell;
 		-- projectile streaks sized by cross-axis; oversized AoE capped so it doesn't swamp neighbors).
@@ -171,12 +160,7 @@ script CombatFxLogic extends Logic
 			["mage_thunder_spear"] = 1.15,
 			["mage_holy_symbol"] = 1.0,
 			["mage_shining_ray"] = 0.35,
-			["mage_meteor"] = 0.85,
 			["mage_poison_mist"] = 0.45,
-			["mage_chain_lightning"] = 0.55,
-			["mage_blizzard"] = 0.45,
-			["mage_heal"] = 1.0,
-			["mage_angel_ray"] = 0.35,
 			["thief_double_stab"] = 0.6,
 			["thief_savage_blow"] = 0.75,
 			["thief_lucky_seven"] = 1.85,

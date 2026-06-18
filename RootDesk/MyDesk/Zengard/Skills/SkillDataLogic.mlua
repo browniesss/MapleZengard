@@ -246,7 +246,7 @@ script SkillDataLogic extends Logic
 			desc = "신성한 축복으로 고정 데미지를 +2씩 증가",
 			iconRuid = "1306d09353bb4fd1b203a0670c6a94e1" })
 
-		-- Mage tier-3 branch skills. Existing tier-4 style spells below stay gated above the prototype cap.
+		-- Mage tier-3 branch skills. Prototype scope ends at tier 3.
 		addSkill({ skillId = "mage_explosion", displayName = "익스플로전", job = "mage", kind = "ACTIVE",
 			jobTier = 3, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 2,
 			damagePerLv = { 4, 6, 9 }, element = "FIRE",
@@ -273,41 +273,11 @@ script SkillDataLogic extends Logic
 			desc = "성스러운 빛줄기로 직선상의 적을 두 번 관통합니다.",
 			iconRuid = "thumbnail://786320718c6a4d06bdc3eec55fd0b7d9" })
 
-		-- Mage tier-4 style branch skills are retained for data compatibility but unreachable while
-		-- GrowthConfig.MAX_JOB_TIER is 3.
-		-- firepoison (불독)
-		addSkill({ skillId = "mage_meteor", displayName = "메테오", job = "mage", kind = "ACTIVE",
-			jobTier = 4, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 1,
-			damagePerLv = { 6, 9, 12 }, element = "FIRE",
-			desc = "운석을 떨어뜨려 주위 8방의 적을 불태움",
-			iconRuid = "fe86d80277664393aaca4984b350bc29" })
 		addSkill({ skillId = "mage_poison_mist", displayName = "포이즌 미스트", job = "mage", kind = "ACTIVE",
 			jobTier = 3, advRoute = "firepoison", shape = "ADJACENT8", range = 1, hits = 2,
 			damagePerLv = { 7, 10, 14 }, element = "POISON",
 			desc = "독안개로 주위 8방의 적을 2회 잠식",
 			iconRuid = "78031d46ae3847fbabd0de6ae43011dc" })
-		-- icelightning (썬콜)
-		addSkill({ skillId = "mage_chain_lightning", displayName = "체인 라이트닝", job = "mage", kind = "ACTIVE",
-			jobTier = 4, advRoute = "icelightning", shape = "LINE", range = 7, hits = 2,
-			damagePerLv = { 5, 7, 10 }, element = "LIGHTNING", linePierce = true, directional = true,
-			desc = "직선으로 번개를 흘려 적을 2회 관통",
-			iconRuid = "7db0e2e559a1442bb297e6980820a0db" })
-		addSkill({ skillId = "mage_blizzard", displayName = "블리자드", job = "mage", kind = "ACTIVE",
-			jobTier = 4, advRoute = "icelightning", shape = "ADJACENT8", range = 1, hits = 2,
-			damagePerLv = { 8, 11, 15 }, element = "ICE",
-			desc = "눈보라로 주위 8방의 적을 2회 얼림",
-			iconRuid = "be84c1f93dd447da885431b27006a35d" })
-		-- bishop (비숍)
-		addSkill({ skillId = "mage_heal", displayName = "힐", job = "mage", kind = "ACTIVE",
-			jobTier = 4, advRoute = "bishop", shape = "RANGED_TARGET", range = 4, hits = 3,
-			damagePerLv = { 4, 6, 8 }, element = "HOLY",
-			desc = "원거리 대상에게 신성한 빛을 3회 시전",
-			iconRuid = "fd7e50112b9740018cbe75da3fe1479f" })
-		addSkill({ skillId = "mage_angel_ray", displayName = "엔젤 레이", job = "mage", kind = "ACTIVE",
-			jobTier = 4, advRoute = "bishop", shape = "RANGED_TARGET", range = 5, hits = 2,
-			damagePerLv = { 9, 13, 17 }, element = "HOLY",
-			desc = "천사의 광선으로 원거리 대상을 2회 강타",
-			iconRuid = "a4e73b5f514647dcbc13d61ca01bdc8b" })
 
 		self.skillTable = skills
 
