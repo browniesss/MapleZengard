@@ -667,7 +667,7 @@ script GrowthLogic extends Logic
 				desc = desc .. " · " .. effectDesc
 			end
 		elseif candidate.kind == "FUSION" then
-			desc = "합성 완료"
+			desc = "합성 완성"
 			if effectDesc ~= "" then
 				desc = desc .. " · " .. effectDesc
 			end

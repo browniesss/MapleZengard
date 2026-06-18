@@ -4,7 +4,7 @@ script SkillDataLogic extends Logic
 	-- Balance constants (MASTER_PLAN §7.4) — single source, other systems must read these.
 	property integer SKILL_MAX_LEVEL = 3
 	property integer INITIAL_CHOICE_COUNT = 2
-	property number FUSION_CHOICE_CHANCE = 0.30
+	property number FUSION_CHOICE_CHANCE = 1.0
 	property number BASE_CRIT_CHANCE = 0.10
 	property number CRIT_MULTIPLIER = 2.0
 	property integer MAX_OWNED_SKILLS = 8

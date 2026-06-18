@@ -108,7 +108,7 @@ script SkillChoiceLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method table GetChoiceCandidates(string userId, integer slotCount)
-		-- Levelup candidate roll (§7.1): NEW + LEVELUP pool, then a 30% fusion slot substitution.
+		-- Levelup candidate roll (§7.1): NEW + LEVELUP pool, then an activated fusion slot substitution.
 		-- p.15: joined companions share the same weighted pool, each candidate tagged with ownerId+label.
 		local job = self:GetUserJob(userId)
 		local pool = self:CollectOwnerCandidates(userId, job, true, "")
@@ -132,6 +132,8 @@ script SkillChoiceLogic extends Logic
 		end
 
 		-- Fusion slot substitution (R10, D5) — base char only; replaces a base-char slot.
+		-- FUSION_CHOICE_CHANCE is 1.0 by design: once the player earns a fusion, the next card set
+		-- should clearly surface it instead of hiding the payoff behind another roll.
 		local activated = _SkillFusionLogic:GetActivatedRecipeIds(userId)
 		if #activated > 0 and _UtilLogic:RandomDouble() < _SkillDataLogic.FUSION_CHOICE_CHANCE then
 			local baseSlots = {}
