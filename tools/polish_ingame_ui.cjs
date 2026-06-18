@@ -152,3 +152,72 @@ function ensureText(b, id, text, options) {
   }
   b.write("ui/SkillHUDGroup.ui");
 }
+
+{
+  const b = UIBuilder.read("ui/ChoicePopupGroup.ui");
+  sp(b, "Dimmer", { Color: col(0, 0, 0, 0.64), RaycastTarget: true });
+  b.patch("TitleBar", { anchor: "middle-center", pos: [0, 330], rect_size: [760, 86], pivot: [0.5, 0.5] });
+  sp(b, "TitleBar", { Color: col(0.06, 0.039, 0.026, 0.96), Type: 1, DropShadow: true, DropShadowDistance: 4 });
+  b.patch("TitleBar/Title", { rect_size: [680, 54] });
+  tx(b, "TitleBar/Title", {
+    FontSize: 34,
+    MinSize: 25,
+    MaxSize: 36,
+    Bold: true,
+    FontColor: col(1, 0.85, 0.36, 1),
+    Alignment: 4,
+    UseOutLine: true,
+    OutlineColor: col(0.18, 0.08, 0.02, 0.95),
+    OutlineWidth: 1.6,
+  });
+
+  for (let i = 1; i <= 5; i += 1) {
+    const card = `Card${i}`;
+    sp(b, card, { Color: col(0.07, 0.09, 0.13, 0.98), Type: 1, DropShadow: true, DropShadowDistance: 5 });
+    tx(b, card, { FontSize: 1, MinSize: 1, MaxSize: 1, FontColor: col(1, 1, 1, 0) });
+    btn(b, card);
+
+    b.patch(`${card}/GradeBorder`, { pos: [0, -16], rect_size: [268, 170] });
+    sp(b, `${card}/GradeBorder`, { Color: col(0.58, 0.68, 0.82, 0.92), Type: 1, DropShadow: true, DropShadowDistance: 1.5 });
+    b.patch(`${card}/IconSlot`, { pos: [0, -30], rect_size: [132, 132] });
+    sp(b, `${card}/IconSlot`, { Color: col(0.12, 0.14, 0.18, 0.96), Type: 1, DropShadow: true, DropShadowDistance: 1.5 });
+    b.patch(`${card}/Icon`, { pos: [0, -30], rect_size: [94, 94] });
+    sp(b, `${card}/Icon`, { Color: col(1, 1, 1, 1), PreserveAspect: true });
+    b.patch(`${card}/GradeText`, { pos: [0, -142], rect_size: [170, 24] });
+    tx(b, `${card}/GradeText`, { FontSize: 15, MinSize: 11, MaxSize: 16, Bold: true, Alignment: 4, FontColor: col(1, 0.86, 0.4, 1) });
+    b.patch(`${card}/NameText`, { pos: [0, -198], rect_size: [258, 52] });
+    tx(b, `${card}/NameText`, {
+      FontSize: 25,
+      MinSize: 17,
+      MaxSize: 27,
+      Bold: true,
+      Alignment: 4,
+      FontColor: col(0.98, 0.99, 1, 1),
+      UseOutLine: true,
+      OutlineColor: col(0, 0, 0, 0.86),
+      OutlineWidth: 1.1,
+    });
+    b.patch(`${card}/DescText`, { pos: [0, -260], rect_size: [246, 54] });
+    tx(b, `${card}/DescText`, { FontSize: 15, MinSize: 10, MaxSize: 16, Alignment: 1, FontColor: col(0.78, 0.84, 0.91, 1), LineSpacing: 1.08 });
+    b.patchComponent(`${card}/Fx`, "MOD.Core.UISpriteParticleComponent", {
+      Color: col(1, 0.86, 0.34, 0.82),
+      ParticleCount: 1.35,
+      ParticleSpeed: 0.85,
+      ParticleLifeTime: 1.25,
+      PlaySpeed: 1.08,
+    });
+  }
+
+  const buttons = [
+    ["BtnReroll", col(0.12, 0.08, 0.045, 0.98), col(1, 0.88, 0.54, 1)],
+    ["BtnExpand", col(0.04, 0.11, 0.16, 0.98), col(0.72, 0.94, 1, 1)],
+    ["BtnJobAdv", col(0.2, 0.09, 0.28, 0.98), col(1, 0.78, 1, 1)],
+  ];
+  for (const [id, bg, fg] of buttons) {
+    sp(b, id, { Color: bg, Type: 1, DropShadow: true, DropShadowDistance: 3 });
+    tx(b, id, { FontSize: 24, MinSize: 17, MaxSize: 26, Bold: true, Alignment: 4, FontColor: fg });
+    btn(b, id);
+  }
+  tx(b, "LootText", { FontSize: 21, MinSize: 15, MaxSize: 23, Bold: true, Alignment: 4, FontColor: col(1, 0.9, 0.6, 1) });
+  b.write("ui/ChoicePopupGroup.ui");
+}

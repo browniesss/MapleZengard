@@ -235,14 +235,23 @@ script UIChoicePopupLogic extends Logic
 		end
 		local descText = cardEntity:GetChildByName("DescText", false)
 		if isvalid(descText) then
-			descText.TextComponent.Text = card.desc or ""
+			descText.TextComponent.Text = self:FormatCardDescription(card.desc or "")
+			descText.TextComponent.FontColor = Color.FromHexCode("#CBD5E1")
 		end
 		local gradeText = cardEntity:GetChildByName("GradeText", false)
 		if isvalid(gradeText) then
 			gradeText.TextComponent.Text = self:GetGradeLabel(grade)
 			gradeText.TextComponent.FontColor = self:GetGradeColor(grade)
 		end
-		cardEntity.SpriteGUIRendererComponent.Color = self:GetGradeColor(grade)
+		cardEntity.SpriteGUIRendererComponent.Color = self:GetGradeBackgroundColor(grade)
+		local gradeBorder = cardEntity:GetChildByName("GradeBorder", false)
+		if isvalid(gradeBorder) then
+			gradeBorder.SpriteGUIRendererComponent.Color = self:GetGradeColor(grade)
+		end
+		local iconSlot = cardEntity:GetChildByName("IconSlot", false)
+		if isvalid(iconSlot) then
+			iconSlot.SpriteGUIRendererComponent.Color = self:GetGradeIconSlotColor(grade)
+		end
 		local icon = cardEntity:GetChildByName("Icon", false)
 		if isvalid(icon) and card.iconRuid ~= nil and card.iconRuid ~= "" then
 			icon.SpriteGUIRendererComponent.ImageRUID = DataRef(card.iconRuid)
@@ -268,6 +277,34 @@ script UIChoicePopupLogic extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method string FormatCardDescription(string desc)
+		-- Splits space-delimited descriptions into two compact lines for the narrow card body.
+		if desc == nil or desc == "" then
+			return ""
+		end
+		local first = ""
+		local second = ""
+		for word in string.gmatch(desc, "%S+") do
+			if first == "" then
+				first = word
+			elseif string.len(first .. " " .. word) <= 34 then
+				first = first .. " " .. word
+			elseif second == "" then
+				second = word
+			elseif string.len(second .. " " .. word) <= 38 then
+				second = second .. " " .. word
+			else
+				second = second .. "..."
+				break
+			end
+		end
+		if second == "" then
+			return first
+		end
+		return first .. "\n" .. second
+	end
+
+	@ExecSpace("ClientOnly")
 	method Color GetGradeTitleColor(string grade)
 		if grade == "EPIC" then
 			return Color.FromHexCode("#F5D0FE")
@@ -276,6 +313,30 @@ script UIChoicePopupLogic extends Logic
 			return Color.FromHexCode("#BFDBFE")
 		end
 		return Color.FromHexCode("#F8FAFC")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Color GetGradeBackgroundColor(string grade)
+		-- Uses a dark card body so grade color reads as a premium accent, not a flat full-card fill.
+		if grade == "EPIC" then
+			return Color.FromHexCode("#241038")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#0E2442")
+		end
+		return Color.FromHexCode("#18202B")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Color GetGradeIconSlotColor(string grade)
+		-- Tints the icon well slightly toward the grade while keeping item/skill icons readable.
+		if grade == "EPIC" then
+			return Color.FromHexCode("#3D1B5C")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#143A68")
+		end
+		return Color.FromHexCode("#263241")
 	end
 
 	@ExecSpace("ClientOnly")
