@@ -661,18 +661,38 @@ script UICombatControlLogic extends Logic
 					if data ~= nil then
 						skillName = data.displayName
 					end
+					local iconRuid = ""
+					if data ~= nil and data.iconRuid ~= nil then
+						iconRuid = data.iconRuid
+					end
 					local pendingIndex = 0
 					for p, pendingId in ipairs(self.pendingOrderIds) do
 						if pendingId == skillId then
 							pendingIndex = p
 						end
 					end
-					if isvalid(slot.TextComponent) then
-						if pendingIndex > 0 then
-							slot.TextComponent.Text = "[" .. pendingIndex .. "]\n" .. skillName
-						else
-							slot.TextComponent.Text = i .. ".\n" .. skillName
+					local orderNo = tostring(i)
+					if pendingIndex > 0 then
+						orderNo = tostring(pendingIndex)
+					end
+					local label = self:FormatSkillSlotLabel(skillName)
+					local icon = slot:GetChildByName("Icon", false)
+					if isvalid(icon) then
+						icon.Enable = iconRuid ~= ""
+						if iconRuid ~= "" then
+							icon.SpriteGUIRendererComponent.ImageRUID = DataRef(iconRuid)
 						end
+					end
+					local orderText = slot:GetChildByName("OrderText", false)
+					if isvalid(orderText) and isvalid(orderText.TextComponent) then
+						orderText.TextComponent.Text = orderNo
+					end
+					local labelText = slot:GetChildByName("Label", false)
+					if isvalid(labelText) and isvalid(labelText.TextComponent) then
+						labelText.TextComponent.Text = label
+					end
+					if isvalid(slot.TextComponent) then
+						slot.TextComponent.Text = ""
 					end
 					if isvalid(slot.SpriteGUIRendererComponent) then
 						if pendingIndex > 0 then
@@ -691,6 +711,38 @@ script UICombatControlLogic extends Logic
 				self.orderTitleText.TextComponent.Text = "스킬 순서 — 슬롯을 탭해 시전 순서 지정"
 			end
 		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatSkillSlotLabel(string skillName)
+		-- Keeps long Korean skill names inside the compact order slots.
+		local aliases = {
+			["파워 스트라이크"] = "파워\n스트라이크",
+			["슬래시 블러스트"] = "슬래시\n블러스트",
+			["애로우 블로우"] = "애로우\n블로우",
+			["아이언 애로우"] = "아이언\n애로우",
+			["애로우 봄"] = "애로우 봄",
+			["애로우 레인"] = "애로우 레인",
+			["매직 클로"] = "매직 클로",
+			["에너지 볼트"] = "에너지\n볼트",
+			["에너지 클로"] = "에너지\n클로",
+			["파이어 애로우"] = "파이어\n애로우",
+			["썬더 볼트"] = "썬더 볼트",
+			["썬더 스피어"] = "썬더\n스피어",
+			["아이스 스트라이크"] = "아이스\n스트라이크",
+			["쉐도우 파트너"] = "쉐도우\n파트너",
+			["새비지 블로우"] = "새비지\n블로우",
+			["트리플 세븐"] = "트리플\n세븐",
+			["웨폰 부스터"] = "웨폰\n부스터",
+			["매직 부스터"] = "매직\n부스터",
+			["소울 애로우"] = "소울\n애로우",
+			["크리티컬 샷"] = "크리티컬\n샷",
+		}
+		local alias = aliases[skillName]
+		if alias ~= nil then
+			return alias
+		end
+		return skillName
 	end
 
 	@ExecSpace("ClientOnly")
