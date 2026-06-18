@@ -367,6 +367,27 @@ script CombatFxLogic extends Logic
 	end
 
 	@ExecSpace("Multicast")
+	method void PlayExtraActionFx(integer col, integer row, string direction)
+		-- Shadow Partner / extra-action trigger tell: a short clone flash at the caster cell before
+		-- the queued follow-up cast, so the player can read why the same skill fires again.
+		if not isvalid(_UserService.LocalPlayer) then
+			return
+		end
+		local inst = self:ResolveFxInstigator()
+		local pos = _BoardLogic:CellToWorld(col, row)
+		local effectRuid = self:ResolveImpactEffectRuid("thief_shadow_partner")
+		if effectRuid ~= "" then
+			local options = self:BuildBoardFxOptions(row, direction == "LEFT", false)
+			local s = self:ResolveImpactEffectScale("thief_shadow_partner")
+			local serial = _EffectService:PlayEffect(effectRuid, inst, pos, 0, Vector3(s, s, 1), false, options)
+			log("[CombatFxLogic] extra action fx: ruid=" .. effectRuid .. " serial=" .. tostring(serial) .. " at (" .. tostring(col) .. "," .. tostring(row) .. ")")
+		else
+			_ParticleService:PlayBasicParticle(BasicParticleType.StarVortex, inst, pos, 0, Vector3(1.1, 1.1, 1), false, nil)
+			log("[CombatFxLogic] extra action particle at (" .. tostring(col) .. "," .. tostring(row) .. ")")
+		end
+	end
+
+	@ExecSpace("Multicast")
 	method void PlayHitFx(string fxKey, integer col, integer row)
 		-- One burst per damaged cell; kept logless to avoid per-hit log spam.
 		-- Particles/sound are client-side; skip the server leg of the Multicast entirely.

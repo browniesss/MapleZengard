@@ -367,6 +367,7 @@ script CombatLogic extends Logic
 		if not entry.isExtra and _SkillStatLogic:RollExtraAction(entry.ownerId) then
 			-- §1.4: nimble body grants one extra cast; the extra cast never re-rolls.
 			local followDamageMul = _SkillStatLogic:GetExtraActionDamageMul(entry.ownerId)
+			_CombatFxLogic:PlayExtraActionFx(cell.col, cell.row, direction)
 			table.insert(self.castQueue, self.queueCursor + 1, { ownerId = entry.ownerId, skillId = entry.skillId, isExtra = true, extraDamageMul = followDamageMul })
 			log("[CombatLogic] extra action: owner=" .. entry.ownerId .. " skill=" .. entry.skillId .. " damageMul=" .. tostring(followDamageMul))
 		end
