@@ -720,7 +720,11 @@ script GrowthLogic extends Logic
 		if balanceCard ~= nil and balanceCard.grade ~= nil and balanceCard.grade ~= "" then
 			grade = balanceCard.grade
 		end
-		return { choiceId = equipId, kind = "EQUIP", name = display.name, desc = display.desc, iconRuid = iconRuid, grade = grade, flash = grade == "EPIC" }
+		local desc = display.desc
+		if balanceCard ~= nil and balanceCard.desc ~= nil and balanceCard.desc ~= "" then
+			desc = balanceCard.desc
+		end
+		return { choiceId = equipId, kind = "EQUIP", name = display.name, desc = desc, iconRuid = iconRuid, grade = grade, flash = grade == "EPIC" }
 	end
 
 	@ExecSpace("ServerOnly")
