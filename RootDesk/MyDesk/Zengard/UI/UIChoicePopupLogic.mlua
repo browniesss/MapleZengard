@@ -61,6 +61,8 @@ script UIChoicePopupLogic extends Logic
 
 	property any cardEntities = nil
 
+	property any currentCards = nil
+
 	property any inputHandlers = nil
 
 	property any busHandlers = nil
@@ -158,6 +160,7 @@ script UIChoicePopupLogic extends Logic
 			count = #self.cardEntities
 		end
 		self.currentSetId = cards[1].setId or 0
+		self.currentCards = cards
 		local cardWidth = 300
 		if isvalid(self.cardEntities[1]) then
 			cardWidth = self.cardEntities[1].UITransformComponent.RectSize.x
@@ -201,11 +204,20 @@ script UIChoicePopupLogic extends Logic
 	@ExecSpace("ClientOnly")
 	method boolean ShouldPlayRefreshFx(table cards)
 		for _, card in ipairs(cards) do
-			if card.flash == true or card.grade == "EPIC" then
+			if self:ShouldCardGlow(card) then
 				return true
 			end
 		end
 		return false
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean ShouldCardGlow(table card)
+		-- Persistent glow is reserved for high-impact picks; refresh FX may still flash all cards.
+		if card == nil then
+			return false
+		end
+		return card.flash == true or card.grade == "EPIC"
 	end
 
 	@ExecSpace("ClientOnly")
@@ -215,6 +227,8 @@ script UIChoicePopupLogic extends Logic
 			return
 		end
 		self.isOpen = false
+		self.currentCards = nil
+		self.cardRefreshFxTime = 0
 		if isvalid(self.popupRoot) then
 			self.popupRoot.Enable = false
 		end
@@ -258,7 +272,7 @@ script UIChoicePopupLogic extends Logic
 		end
 		local fx = cardEntity:GetChildByName("Fx", false)
 		if isvalid(fx) then
-			fx.Enable = grade == "EPIC" or card.flash == true
+			fx.Enable = self:ShouldCardGlow(card)
 		end
 		if isvalid(nameText) then
 			nameText.TextComponent.FontColor = self:GetGradeTitleColor(grade)
@@ -434,11 +448,19 @@ script UIChoicePopupLogic extends Logic
 		if enabled then
 			pulse = 1.0 + 0.045 * ((math.sin((0.75 - self.cardRefreshFxTime) * 24.0) + 1.0) * 0.5)
 		end
-		for _, cardEntity in ipairs(self.cardEntities) do
+		for slot, cardEntity in ipairs(self.cardEntities) do
 			if isvalid(cardEntity) and cardEntity.Enable then
 				local fx = cardEntity:GetChildByName("Fx", false)
 				if isvalid(fx) then
-					fx.Enable = enabled
+					if enabled then
+						fx.Enable = true
+					else
+						local card = nil
+						if self.currentCards ~= nil then
+							card = self.currentCards[slot]
+						end
+						fx.Enable = self:ShouldCardGlow(card)
+					end
 				end
 				if isvalid(cardEntity.UITransformComponent) then
 					cardEntity.UITransformComponent.UIScale = Vector3(pulse, pulse, 1)
