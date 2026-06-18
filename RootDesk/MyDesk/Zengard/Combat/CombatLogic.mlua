@@ -496,7 +496,15 @@ script CombatLogic extends Logic
 			end
 			local hit = _SkillStatLogic:ComputeHitDamage(ownerId, skillId, stats.critChanceAdd, info)
 			local followMul = extraDamageMul or 1.0
-			local final = math.floor(hit.damage * (1 + stats.damageMul) * followMul)
+			local damageMul = stats.damageMul or 0
+			local element = skillData.element or "NONE"
+			if element ~= "NONE" and element ~= "" then
+				damageMul = damageMul + (stats.elementDamageMul or 0)
+				if hit.elementMultiplier ~= nil and hit.elementMultiplier > 1.0 then
+					damageMul = damageMul + (stats.elementAdvantageDamageMul or 0)
+				end
+			end
+			local final = math.floor(hit.damage * (1 + damageMul) * followMul)
 			if hit.elementMultiplier ~= nil and hit.elementMultiplier ~= 1.0 then
 				log("[CombatLogic] elemental matchup: skill=" .. skillId .. " target=" .. info.typeId .. " mul=" .. tostring(hit.elementMultiplier) .. " tag=" .. tostring(hit.elementLabel))
 			end
@@ -538,6 +546,8 @@ script CombatLogic extends Logic
 			rangeAdd = equip.rangeAdd or 0,
 			targetAdd = equip.targetAdd or 0,
 			atkSpeedMul = (equip.atkSpeedMul or 0) + (growth.atkSpeedMul or 0),
+			elementDamageMul = equip.elementDamageMul or 0,
+			elementAdvantageDamageMul = equip.elementAdvantageDamageMul or 0,
 		}
 		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
 			local passive = _SkillDataLogic:GetSkillData(entry.skillId)

@@ -55,7 +55,9 @@ script EquipmentBalance extends Logic
 			{ id = "eq_arcane_lens", name = "아케인 렌즈", desc = "사거리 +1, 스킬 피해 +8%", grade = "EPIC", stats = { rangeAdd = 1, skillDmgMul = 0.08 }, iconRuid = "thumbnail://598d2d1859e84eaab18ae460a0a1e0a4" },
 			{ id = "eq_boss_hunter_medal", name = "보스 헌터 메달", desc = "공격력 +10%, 전리품 +5%p", grade = "EPIC", stats = { atkMul = 0.10, lootDropAdd = 0.05 }, iconRuid = "thumbnail://3caa4d96acd74517829aa166f10e8a28" },
 			{ id = "eq_cursed_spear", name = "저주받은 창", desc = "공격력 +28%, 공격 속도 -12%", grade = "EPIC", stats = { atkMul = 0.28, atkSpeedMul = -0.12 }, iconRuid = "thumbnail://60515da659724af39ae5be5e8e8cccba" },
+			{ id = "eq_elemental_codex", name = "엘리멘탈 코덱스", desc = "속성 스킬 피해 +16%, 약점 공격 피해 +8%", grade = "EPIC", stats = { elementDamageMul = 0.16, elementAdvantageDamageMul = 0.08 }, iconRuid = "thumbnail://598d2d1859e84eaab18ae460a0a1e0a4" },
 			{ id = "eq_spell_trace", name = "주문서 조각", desc = "스킬 피해 +6%, 공격 속도 +6%", stats = { skillDmgMul = 0.06, atkSpeedMul = 0.06 }, iconRuid = "thumbnail://598d2d1859e84eaab18ae460a0a1e0a4" },
+			{ id = "eq_resonance_orb", name = "공명 오브", desc = "속성 스킬 피해 +10%, 치명타 +4%p", stats = { elementDamageMul = 0.10, critChanceAdd = 0.04 }, iconRuid = "thumbnail://df732e3d54da4d9bb5b97ca0f938b56f" },
 			{ id = "eq_hunter_mark", name = "헌터의 표식", desc = "치명타 +7%p, 전리품 +7%p", stats = { critChanceAdd = 0.07, lootDropAdd = 0.07 }, iconRuid = "thumbnail://586154fb11a4489a88e78f3d2a028884" },
 			{ id = "eq_assassin_band", name = "어쌔신 밴드", desc = "추가 행동 +12%p, 공격 속도 +8%", grade = "EPIC", stats = { extraActionChance = 0.12, extraActionDamageMul = 0.70, atkSpeedMul = 0.08 }, iconRuid = "thumbnail://cc7f34b0c45d49679a7b9ffcd71341ee" },
 		}

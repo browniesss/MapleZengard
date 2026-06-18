@@ -214,6 +214,8 @@ script EquipmentLogic extends Logic
 			lootDropAdd = 0,
 			extraActionChance = 0,
 			extraActionDamageMul = 0,
+			elementDamageMul = 0,
+			elementAdvantageDamageMul = 0,
 		}
 	end
 
