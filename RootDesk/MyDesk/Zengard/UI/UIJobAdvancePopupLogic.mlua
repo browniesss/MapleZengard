@@ -20,6 +20,8 @@ script UIJobAdvancePopupLogic extends Logic
 
 	property boolean isOpen = false
 
+	property number celebrationTime = 0
+
 	property boolean wired = false
 
 	property any inputHandlers = nil
@@ -48,6 +50,7 @@ script UIJobAdvancePopupLogic extends Logic
 				self.wired = true
 			end
 		end
+		self:UpdateCelebrationFx(dt)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -87,6 +90,7 @@ script UIJobAdvancePopupLogic extends Logic
 		local jobKey = jobInfo.jobKey or ""
 		local branch = jobInfo.branch or ""
 		local jobName = jobInfo.jobName or self:GetJobDisplayName(jobKey, tier, branch)
+		self.celebrationTime = 1.35
 		if isvalid(self.titleText) then
 			self.titleText.Text = tier .. "차 전직!"
 		end
@@ -103,6 +107,7 @@ script UIJobAdvancePopupLogic extends Logic
 		if isvalid(self.popupRoot) then
 			self.popupRoot.Enable = true
 		end
+		self:UpdateCelebrationFx(0)
 		if not wasOpen then
 			_UIRouterLogic:ApplyModalHudOcclusion(true)
 		end
@@ -118,8 +123,83 @@ script UIJobAdvancePopupLogic extends Logic
 		if isvalid(self.popupRoot) then
 			self.popupRoot.Enable = false
 		end
+		self.celebrationTime = 0
+		self:SetCelebrationFxEnabled(false)
 		_UIRouterLogic:ApplyModalHudOcclusion(false)
 		log("[UIJobAdvancePopupLogic] job advance popup closed")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateCelebrationFx(number dt)
+		-- Drives the short "job unlocked" burst and the softer idle glow while the modal is open.
+		if not self.isOpen or not isvalid(self.popupRoot) then
+			return
+		end
+		if self.celebrationTime > 0 then
+			self.celebrationTime = math.max(0, self.celebrationTime - dt)
+		end
+		local elapsed = 1.35 - self.celebrationTime
+		if elapsed < 0 then
+			elapsed = 0
+		end
+		local burstRatio = 0
+		if self.celebrationTime > 0 then
+			burstRatio = self.celebrationTime / 1.35
+		end
+		local idlePulse = (math.sin(_UtilLogic.ElapsedSeconds * 5.4) + 1.0) * 0.5
+		local panel = self.popupRoot:GetChildByName("Panel", false)
+		if isvalid(panel) and isvalid(panel.UITransformComponent) then
+			local introScale = 1.0
+			if elapsed < 0.22 then
+				introScale = 0.92 + (elapsed / 0.22) * 0.12
+			elseif elapsed < 0.44 then
+				introScale = 1.04 - ((elapsed - 0.22) / 0.22) * 0.04
+			end
+			local idleScale = 1.0 + idlePulse * 0.012
+			local s = math.max(introScale, idleScale)
+			panel.UITransformComponent.UIScale = Vector3(s, s, 1)
+		end
+		self:SetCelebrationFxEnabled(true)
+		self:SetChildColor("Header", Color.FromHexCode("#FFF2B8"))
+		local confirmPulse = 1.0 + idlePulse * 0.035
+		if isvalid(self.btnConfirm) and isvalid(self.btnConfirm.UITransformComponent) then
+			self.btnConfirm.UITransformComponent.UIScale = Vector3(confirmPulse, confirmPulse, 1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetCelebrationFxEnabled(boolean enabled)
+		-- Toggles all optional visual-only particle children created by the UIBuilder polish pass.
+		if not isvalid(self.popupRoot) then
+			return
+		end
+		local panel = self.popupRoot:GetChildByName("Panel", false)
+		if not isvalid(panel) then
+			return
+		end
+		local names = { "BurstFx", "SparkFx" }
+		for _, childName in ipairs(names) do
+			local child = panel:GetChildByName(childName, false)
+			if isvalid(child) then
+				child.Enable = enabled
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetChildColor(string childName, Color color)
+		-- Applies a sprite tint to optional direct children under Panel.
+		if not isvalid(self.popupRoot) then
+			return
+		end
+		local panel = self.popupRoot:GetChildByName("Panel", false)
+		if not isvalid(panel) then
+			return
+		end
+		local child = panel:GetChildByName(childName, false)
+		if isvalid(child) and isvalid(child.SpriteGUIRendererComponent) then
+			child.SpriteGUIRendererComponent.Color = color
+		end
 	end
 
 	@ExecSpace("ClientOnly")

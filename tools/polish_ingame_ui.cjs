@@ -256,3 +256,103 @@ function ensureText(b, id, text, options) {
   tx(b, "LootText", { FontSize: 21, MinSize: 15, MaxSize: 23, Bold: true, Alignment: 4, FontColor: col(1, 0.9, 0.6, 1) });
   b.write("ui/ChoicePopupGroup.ui");
 }
+
+{
+  const b = UIBuilder.read("ui/JobAdvancePopupGroup.ui");
+  sp(b, "Dimmer", { Color: col(0, 0, 0, 0.72), Type: 1, RaycastTarget: true });
+  b.patch("Panel", { anchor: "middle-center", pos: [0, 8], rect_size: [820, 660], pivot: [0.5, 0.5] });
+  b.patch("Panel/Bg", { anchor: "stretch", pos: [0, 0], rect_size: [820, 660], pivot: [0.5, 0.5] });
+  sp(b, "Panel/Bg", { Color: col(0.034, 0.026, 0.022, 0.98), Type: 1, DropShadow: true, DropShadowDistance: 6 });
+  b.patch("Panel/Frame", { anchor: "stretch", pos: [0, 0], rect_size: [820, 660], pivot: [0.5, 0.5] });
+  sp(b, "Panel/Frame", { Color: col(1, 0.78, 0.28, 0.92), Type: 1, DropShadow: true, DropShadowDistance: 2 });
+  b.patch("Panel/Header", { anchor: "top-center", pos: [0, -52], rect_size: [650, 100], pivot: [0.5, 1] });
+  sp(b, "Panel/Header", { Color: col(1, 0.86, 0.32, 0.98), Type: 1, DropShadow: true, DropShadowDistance: 3 });
+
+  try {
+    b.remove("Panel/Aura");
+  } catch (_) {}
+
+  try {
+    b.getId("Panel/BurstFx");
+    b.patch("Panel/BurstFx", { anchor: "middle-center", pos: [0, 82], rect_size: [420, 360], pivot: [0.5, 0.5], enable: false });
+  } catch (_) {
+    b.basicParticle("Panel/BurstFx", {
+      anchor: "middle-center",
+      pos: [0, 82],
+      rect_size: [420, 360],
+      pivot: [0.5, 0.5],
+      particle_type: 3,
+      color: col(1, 0.84, 0.28, 0.9),
+      particle_size: 1.25,
+      particle_speed: 0.8,
+      particle_count: 1.2,
+      particle_lifetime: 1.0,
+      play_speed: 1.1,
+      enable: false,
+    });
+  }
+
+  try {
+    b.getId("Panel/SparkFx");
+    b.patch("Panel/SparkFx", { anchor: "middle-center", pos: [0, 58], rect_size: [680, 420], pivot: [0.5, 0.5], enable: false });
+  } catch (_) {
+    b.basicParticle("Panel/SparkFx", {
+      anchor: "middle-center",
+      pos: [0, 58],
+      rect_size: [680, 420],
+      pivot: [0.5, 0.5],
+      particle_type: 5,
+      color: col(0.76, 0.55, 1, 0.82),
+      particle_size: 0.95,
+      particle_speed: 0.55,
+      particle_count: 0.9,
+      particle_lifetime: 1.35,
+      play_speed: 0.9,
+      enable: false,
+    });
+  }
+
+  b.patch("Panel/Emblem", { anchor: "middle-center", pos: [0, 92], rect_size: [250, 250], pivot: [0.5, 0.5], enable: false });
+  sp(b, "Panel/Emblem", { Color: col(1, 0.95, 0.76, 0.98), Type: 0, DropShadow: true, DropShadowDistance: 3 });
+  b.patch("Panel/Avatar", { anchor: "middle-center", pos: [0, 82], rect_size: [260, 330], pivot: [0.5, 0.5], enable: false });
+  b.patch("Panel/TitleText", { anchor: "top-center", pos: [0, -64], rect_size: [660, 66], pivot: [0.5, 1] });
+  tx(b, "Panel/TitleText", {
+    FontSize: 40,
+    MinSize: 29,
+    MaxSize: 42,
+    Bold: true,
+    Alignment: 4,
+    FontColor: col(1, 0.88, 0.36, 1),
+    UseOutLine: true,
+    OutlineColor: col(0.12, 0.055, 0.01, 1),
+    OutlineWidth: 1.5,
+  });
+  b.patch("Panel/JobNameText", { anchor: "middle-center", pos: [0, -82], rect_size: [660, 62], pivot: [0.5, 0.5] });
+  tx(b, "Panel/JobNameText", {
+    FontSize: 36,
+    MinSize: 25,
+    MaxSize: 38,
+    Bold: true,
+    Alignment: 4,
+    FontColor: col(0.93, 0.82, 1, 1),
+    UseOutLine: true,
+    OutlineColor: col(0.08, 0.025, 0.14, 0.95),
+    OutlineWidth: 1.3,
+  });
+  b.patch("Panel/DescText", { anchor: "middle-center", pos: [0, -140], rect_size: [690, 56], pivot: [0.5, 0.5] });
+  tx(b, "Panel/DescText", { FontSize: 20, MinSize: 15, MaxSize: 22, Alignment: 4, FontColor: col(0.84, 0.9, 0.98, 1), LineSpacing: 1.05 });
+  b.patch("Panel/BtnConfirm", { anchor: "bottom-center", pos: [0, 72], rect_size: [340, 82], pivot: [0.5, 0] });
+  sp(b, "Panel/BtnConfirm", { Color: col(0.84, 0.58, 0.16, 0.98), Type: 1, DropShadow: true, DropShadowDistance: 3 });
+  tx(b, "Panel/BtnConfirm", {
+    Text: "\uD655\uC778",
+    FontSize: 28,
+    MinSize: 20,
+    MaxSize: 30,
+    Bold: true,
+    Alignment: 4,
+    FontColor: col(0.12, 0.07, 0.02, 1),
+    DropShadow: false,
+  });
+  btn(b, "Panel/BtnConfirm");
+  b.write("ui/JobAdvancePopupGroup.ui");
+}
