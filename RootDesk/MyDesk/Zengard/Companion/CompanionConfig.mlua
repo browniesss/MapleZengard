@@ -61,6 +61,17 @@ script CompanionConfig extends Logic
 		return names[jobGroup] or jobGroup
 	end
 
+	method string GetJobGroupIconRuid(string jobGroup)
+		-- Representative weapon thumbnail for companion job-group choice cards.
+		local icons = {
+			WARRIOR = "thumbnail://88e6d4f9c00b407fa2be9d6aaafab276",
+			MAGICIAN = "thumbnail://989be911209545fdacf84f92874cb338",
+			ARCHER = "thumbnail://67ce4147813d49f5975917ee86777950",
+			THIEF = "thumbnail://c80eb7c8ad1f45988e6d74b1c95a0b13",
+		}
+		return icons[jobGroup] or ""
+	end
+
 	method string GetSecondJobDisplayName(string secondJob)
 		-- Korean display name for the joined companion (classic 2nd-job titles).
 		local names = {

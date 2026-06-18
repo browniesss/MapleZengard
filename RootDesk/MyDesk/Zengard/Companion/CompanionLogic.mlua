@@ -132,7 +132,7 @@ script CompanionLogic extends Logic
 				kind = "COMPANION_JOB",
 				name = _CompanionConfig:GetJobGroupDisplayName(jobGroup) .. " 동료",
 				desc = "2차 전직 기준으로 " .. _CompanionConfig:GetJobGroupDisplayName(jobGroup) .. " 동료가 랜덤 합류합니다.",
-				iconRuid = "",
+				iconRuid = _CompanionConfig:GetJobGroupIconRuid(jobGroup),
 				grade = "EPIC",
 			})
 		end
