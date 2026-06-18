@@ -683,15 +683,19 @@ script GrowthLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method table BuildEquipCard(string equipId)
-		-- Equipment cards are RARE grade; display meta comes from GrowthConfig,
-		-- the icon RUID from the EquipmentBalance card pool (#6 single source).
+		-- Equipment cards use balance grade for visual rarity; display meta comes from GrowthConfig,
+		-- while icon RUID and rarity come from the EquipmentBalance card pool (#6 single source).
 		local display = _GrowthConfig:GetEquipCardDisplay(equipId)
 		local iconRuid = ""
 		local balanceCard = _EquipmentBalance:GetCard(equipId)
+		local grade = "RARE"
 		if balanceCard ~= nil and balanceCard.iconRuid ~= nil then
 			iconRuid = balanceCard.iconRuid
 		end
-		return { choiceId = equipId, kind = "EQUIP", name = display.name, desc = display.desc, iconRuid = iconRuid, grade = "RARE" }
+		if balanceCard ~= nil and balanceCard.grade ~= nil and balanceCard.grade ~= "" then
+			grade = balanceCard.grade
+		end
+		return { choiceId = equipId, kind = "EQUIP", name = display.name, desc = display.desc, iconRuid = iconRuid, grade = grade, flash = grade == "EPIC" }
 	end
 
 	@ExecSpace("ServerOnly")
