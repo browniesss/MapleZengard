@@ -52,7 +52,7 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "warrior_rage" then
 			return "4987142bef4b484298eb29c6f64b2f1e"
 		elseif fxKey == "warrior_hyper_body" then
-			return "3ebd5d6967394c2589408f69c2bc5c54"
+			return "60515da659724af39ae5be5e8e8cccba"
 		elseif fxKey == "warrior_combo_attack" then
 			return "3cbc64d1f8564aeaa7585dc2e4699b3b"
 		elseif fxKey == "warrior_dragon_roar" then
@@ -94,7 +94,7 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "mage_thunder_bolt" then
 			return "df732e3d54da4d9bb5b97ca0f938b56f"
 		elseif fxKey == "mage_explosion" then
-			return "ca66b992cea9400eab7d6d202bcb7a60"
+			return "eb0aa9cfb347480db301d352b9955ddb"
 		elseif fxKey == "mage_ice_strike" then
 			return "96b261657b0c4aa792bd6f3e7d6c6681"
 		elseif fxKey == "mage_thunder_spear" then
@@ -109,7 +109,7 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "thief_double_stab" then
 			return "c13c85382144469daf33bf2c9bae7e5e"
 		elseif fxKey == "thief_savage_blow" then
-			return "c13c85382144469daf33bf2c9bae7e5e"
+			return "3720a775e9c241fbb547c81d76598843"
 		elseif fxKey == "thief_lucky_seven" then
 			return "458e72f0720a4584a9a7fc3642b6e601"
 		elseif fxKey == "thief_drain" then
@@ -117,7 +117,7 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "thief_shadow_partner" then
 			return "cc7f34b0c45d49679a7b9ffcd71341ee"
 		elseif fxKey == "thief_assaulter" then
-			return "c13c85382144469daf33bf2c9bae7e5e"
+			return "0612d7370796466099c39e79ec3050a7"
 		elseif fxKey == "thief_triple_seven" then
 			return "63af9dc845db4da2960172417b3eee5d"
 		end
