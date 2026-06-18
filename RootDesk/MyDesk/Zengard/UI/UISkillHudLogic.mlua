@@ -154,17 +154,21 @@ script UISkillHudLogic extends Logic
 				if data ~= nil then
 					label = data.displayName
 				end
-				self:SetSlot(i, label, "Lv." .. tostring(rec.level), materialSet[rec.skillId] == true)
+				local iconRuid = ""
+				if data ~= nil and data.iconRuid ~= nil then
+					iconRuid = data.iconRuid
+				end
+				self:SetSlot(i, label, "Lv." .. tostring(rec.level), iconRuid, materialSet[rec.skillId] == true)
 			else
-				self:SetSlot(i, "", "", false)
+				self:SetSlot(i, "", "", "", false)
 			end
 		end
 		log("[UISkillHud] skill hud refreshed: " .. tostring(#owned) .. " skills")
 	end
 
 	@ExecSpace("ClientOnly")
-	method void SetSlot(integer slotIndex, string label, string levelLabel, boolean showBadge)
-		-- Single write point for one slot's name / level / fusion badge.
+	method void SetSlot(integer slotIndex, string label, string levelLabel, string iconRuid, boolean showBadge)
+		-- Single write point for one slot's icon / name / level / fusion badge.
 		local slotEntity = self.slots[slotIndex]
 		if not isvalid(slotEntity) then
 			return
@@ -185,6 +189,13 @@ script UISkillHudLogic extends Logic
 		if isvalid(nameText) then
 			nameText.TextComponent.Text = label
 		end
+		local icon = slotEntity:GetChildByName("Icon", false)
+		if isvalid(icon) then
+			icon.Enable = iconRuid ~= ""
+			if iconRuid ~= "" then
+				icon.SpriteGUIRendererComponent.ImageRUID = DataRef(iconRuid)
+			end
+		end
 		local levelText = slotEntity:GetChildByName("LevelText", false)
 		if isvalid(levelText) then
 			levelText.TextComponent.Text = levelLabel
@@ -199,7 +210,7 @@ script UISkillHudLogic extends Logic
 	method void ClearSlots()
 		-- Empties all 8 slots (run end / nil snapshot).
 		for i = 1, #self.slots do
-			self:SetSlot(i, "", "", false)
+			self:SetSlot(i, "", "", "", false)
 		end
 	end
 

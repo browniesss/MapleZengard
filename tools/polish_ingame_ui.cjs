@@ -131,24 +131,31 @@ function ensureText(b, id, text, options) {
 
 {
   const b = UIBuilder.read("ui/SkillHUDGroup.ui");
-  b.patch("Root", { anchor: "bottom-left", pos: [28, 24], rect_size: [326, 106], pivot: [0, 0] });
-  b.patch("Root/Bg", { anchor: "stretch", pos: [0, 0], rect_size: [326, 106], pivot: [0.5, 0.5] });
+  b.patch("Root", { anchor: "bottom-left", pos: [28, 28], rect_size: [558, 184], pivot: [0, 0] });
+  b.patch("Root/Bg", { anchor: "stretch", pos: [0, 0], rect_size: [558, 184], pivot: [0.5, 0.5] });
   sp(b, "Root/Bg", { Color: col(0.014, 0.017, 0.024, 0.76), Type: 1, DropShadow: true, DropShadowDistance: 2 });
-  b.patch("Root/Title", { anchor: "top-left", pos: [14, -10], rect_size: [66, 24], pivot: [0, 1] });
-  tx(b, "Root/Title", { Text: "\uC2A4\uD0AC", FontSize: 17, MinSize: 13, MaxSize: 18, Bold: true, FontColor: col(1, 0.82, 0.34, 1) });
-  const xs = [84, 144, 204, 264, 84, 144, 204, 264];
-  const ys = [-14, -14, -14, -14, -56, -56, -56, -56];
+  b.patch("Root/Title", { anchor: "top-left", pos: [16, -12], rect_size: [82, 28], pivot: [0, 1] });
+  tx(b, "Root/Title", { Text: "\uC2A4\uD0AC", FontSize: 18, MinSize: 14, MaxSize: 19, Bold: true, FontColor: col(1, 0.82, 0.34, 1) });
+  const xs = [112, 224, 336, 448, 112, 224, 336, 448];
+  const ys = [-18, -18, -18, -18, -98, -98, -98, -98];
   for (let i = 1; i <= 8; i += 1) {
     const slot = `Root/Slot${i}`;
-    b.patch(slot, { anchor: "top-left", pos: [xs[i - 1], ys[i - 1]], rect_size: [52, 36], pivot: [0, 1] });
+    b.patch(slot, { anchor: "top-left", pos: [xs[i - 1], ys[i - 1]], rect_size: [96, 72], pivot: [0, 1] });
     sp(b, slot, { Color: col(0.095, 0.066, 0.044, 0.88), Type: 1, DropShadow: false });
-    b.patch(`${slot}/Badge`, { anchor: "top-right", pos: [-3, -2], rect_size: [26, 13], pivot: [1, 1] });
-    b.patch(`${slot}/Badge/BadgeText`, { rect_size: [26, 13] });
-    tx(b, `${slot}/Badge/BadgeText`, { FontSize: 9, MinSize: 7, MaxSize: 10, Bold: true, FontColor: col(1, 1, 1, 1) });
-    b.patch(`${slot}/LevelText`, { anchor: "top-center", pos: [0, -16], rect_size: [48, 14], pivot: [0.5, 0.5] });
-    tx(b, `${slot}/LevelText`, { Alignment: 4, FontSize: 10, MinSize: 8, MaxSize: 11, Bold: true, FontColor: col(1, 0.9, 0.55, 1) });
-    b.patch(`${slot}/NameText`, { anchor: "bottom-center", pos: [0, 4], rect_size: [48, 18], pivot: [0.5, 0] });
-    tx(b, `${slot}/NameText`, { FontSize: 8, MinSize: 6, MaxSize: 9, Bold: true, FontColor: col(0.96, 0.98, 1, 1) });
+    try {
+      b.getId(`${slot}/Icon`);
+      b.patch(`${slot}/Icon`, { anchor: "top-center", pos: [0, -8], rect_size: [40, 40], pivot: [0.5, 1] });
+    } catch (_) {
+      b.sprite(`${slot}/Icon`, { anchor: "top-center", pos: [0, -8], rect_size: [40, 40], pivot: [0.5, 1], raycast: false });
+    }
+    sp(b, `${slot}/Icon`, { Color: col(1, 1, 1, 1), PreserveAspect: true, RaycastTarget: false });
+    b.patch(`${slot}/Badge`, { anchor: "top-right", pos: [-3, -3], rect_size: [28, 14], pivot: [1, 1] });
+    b.patch(`${slot}/Badge/BadgeText`, { rect_size: [28, 14] });
+    tx(b, `${slot}/Badge/BadgeText`, { FontSize: 10, MinSize: 8, MaxSize: 11, Bold: true, FontColor: col(1, 1, 1, 1) });
+    b.patch(`${slot}/LevelText`, { anchor: "top-left", pos: [7, -6], rect_size: [42, 15], pivot: [0, 1] });
+    tx(b, `${slot}/LevelText`, { Alignment: 3, FontSize: 10, MinSize: 8, MaxSize: 11, Bold: true, FontColor: col(1, 0.9, 0.55, 1) });
+    b.patch(`${slot}/NameText`, { anchor: "bottom-center", pos: [0, 5], rect_size: [90, 20], pivot: [0.5, 0] });
+    tx(b, `${slot}/NameText`, { FontSize: 10, MinSize: 8, MaxSize: 11, Bold: true, FontColor: col(0.96, 0.98, 1, 1) });
   }
   b.write("ui/SkillHUDGroup.ui");
 }
