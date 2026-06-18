@@ -12,6 +12,10 @@ script EquipmentBalance extends Logic
 
 	property integer LOOT_DROP_COUNT_BOSS = 3
 
+	property integer EQUIP_DRAW_WEIGHT_RARE = 100
+
+	property integer EQUIP_DRAW_WEIGHT_EPIC = 45
+
 	method table GetAllCards()
 		-- Returns the 8-card run-equipment pool as a list (MASTER_PLAN §7.9).
 		if self._T.cards == nil then

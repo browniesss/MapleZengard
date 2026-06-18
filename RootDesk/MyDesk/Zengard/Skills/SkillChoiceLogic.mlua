@@ -122,17 +122,13 @@ script SkillChoiceLogic extends Logic
 			end
 		end
 
-		-- Uniform weights → Fisher-Yates shuffle gives sampling without replacement (E4).
-		for i = #pool, 2, -1 do
-			local j = _UtilLogic:RandomIntegerRange(1, i)
-			pool[i], pool[j] = pool[j], pool[i]
-		end
+		-- Weighted sampling without replacement keeps high-tier base offers readable.
 		local result = {}
 		for i = 1, slotCount do
-			if pool[i] == nil then
+			if #pool == 0 then
 				break
 			end
-			table.insert(result, pool[i])
+			table.insert(result, self:DrawWeightedCandidate(pool, userId))
 		end
 
 		-- Fusion slot substitution (R10, D5) — base char only; replaces a base-char slot.
@@ -154,6 +150,53 @@ script SkillChoiceLogic extends Logic
 
 		log("[SkillChoice] candidates(" .. userId .. ", slots=" .. tostring(slotCount) .. "): " .. self:DescribeChoices(result))
 		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method table DrawWeightedCandidate(table pool, string userId)
+		-- Draws one candidate without replacement using progression-aware weights.
+		local total = 0
+		for _, candidate in ipairs(pool) do
+			total = total + self:GetCandidateDrawWeight(candidate, userId)
+		end
+		if total <= 0 then
+			return table.remove(pool, 1)
+		end
+		local roll = _UtilLogic:RandomIntegerRange(1, total)
+		local cursor = 0
+		for i, candidate in ipairs(pool) do
+			cursor = cursor + self:GetCandidateDrawWeight(candidate, userId)
+			if roll <= cursor then
+				return table.remove(pool, i)
+			end
+		end
+		return table.remove(pool, #pool)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetCandidateDrawWeight(table candidate, string userId)
+		-- Main-character NEW and high-tier skills are prioritized; companion cards stay present but lighter.
+		local weight = 100
+		if candidate == nil then
+			return weight
+		end
+		local ownerId = candidate.ownerId or userId
+		if ownerId ~= userId then
+			weight = 60
+		elseif candidate.kind == "NEW" then
+			weight = 130
+		elseif candidate.kind == "LEVELUP" then
+			weight = 85
+		end
+		local skillData = _SkillDataLogic:GetSkillData(candidate.skillId)
+		if skillData ~= nil and ownerId == userId then
+			if skillData.jobTier >= 3 then
+				weight = weight + 70
+			elseif skillData.jobTier == 2 then
+				weight = weight + 35
+			end
+		end
+		return weight
 	end
 
 	@ExecSpace("ServerOnly")

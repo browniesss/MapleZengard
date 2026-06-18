@@ -85,18 +85,51 @@ script EquipmentLogic extends Logic
 		local pool = {}
 		for _, card in ipairs(_EquipmentBalance:GetAllCards()) do
 			if not session.drawnIds[card.id] then
-				table.insert(pool, card.id)
+				table.insert(pool, card)
 			end
 		end
 		if #pool == 0 then
 			for _, card in ipairs(_EquipmentBalance:GetAllCards()) do
-				table.insert(pool, card.id)
+				table.insert(pool, card)
 			end
 		end
-		local picked = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
-		session.drawnIds[picked] = true
-		log("[EquipmentLogic] card drawn: user=" .. userId .. " equip=" .. picked)
-		return picked
+		local pickedCard = self:PickWeightedEquipmentCard(pool)
+		if pickedCard == nil then
+			return ""
+		end
+		session.drawnIds[pickedCard.id] = true
+		log("[EquipmentLogic] card drawn: user=" .. userId .. " equip=" .. pickedCard.id .. " grade=" .. tostring(pickedCard.grade or "RARE"))
+		return pickedCard.id
+	end
+
+	@ExecSpace("ServerOnly")
+	method table PickWeightedEquipmentCard(table pool)
+		-- Rarity-aware draw: EPIC cards are exciting payout moments, not ordinary filler.
+		local total = 0
+		for _, card in ipairs(pool) do
+			total = total + self:GetCardDrawWeight(card)
+		end
+		if total <= 0 then
+			return nil
+		end
+		local roll = _UtilLogic:RandomIntegerRange(1, total)
+		local cursor = 0
+		for _, card in ipairs(pool) do
+			cursor = cursor + self:GetCardDrawWeight(card)
+			if roll <= cursor then
+				return card
+			end
+		end
+		return pool[#pool]
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetCardDrawWeight(table card)
+		-- Default cards are treated as RARE. EPIC cards draw less often but already flash in UI.
+		if card ~= nil and card.grade == "EPIC" then
+			return _EquipmentBalance.EQUIP_DRAW_WEIGHT_EPIC
+		end
+		return _EquipmentBalance.EQUIP_DRAW_WEIGHT_RARE
 	end
 
 	@ExecSpace("ServerOnly")
