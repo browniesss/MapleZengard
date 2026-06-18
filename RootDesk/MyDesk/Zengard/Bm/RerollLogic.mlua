@@ -47,6 +47,24 @@ script RerollLogic extends Logic
 		log("[RerollLogic] reroll reset: userId=" .. userId .. " remaining=" .. tostring(_BmBalance.REROLL_PER_STAGE_LIMIT))
 	end
 
+	@ExecSpace("ServerOnly")
+	method void GrantReroll(string userId, integer amount, string reason)
+		-- Adds temporary run rerolls from utility cards and pushes the same UI event as normal spending.
+		if userId == nil or userId == "" or amount <= 0 then
+			return
+		end
+		if self.runState == nil then self.runState = {} end
+		local remaining = self:GetRemainingRerolls(userId) + amount
+		self.runState[userId] = remaining
+		local rerollEvent = RerollUsedEvent()
+		rerollEvent.userId = userId
+		rerollEvent.kind = reason
+		rerollEvent.remaining = remaining
+		_ZengardGameLogic:SendGameEvent(rerollEvent)
+		_PlayerDataLogic:QueuePush(userId)
+		log("[RerollLogic] reroll granted: userId=" .. userId .. " +" .. tostring(amount) .. " remaining=" .. tostring(remaining) .. " reason=" .. reason)
+	end
+
 	@ExecSpace("Server")
 	method void RequestReroll(string kind)
 		-- kind: "placement"|"choice" (§4.8). Validates, decrements, then delegates the re-randomization (C-23).

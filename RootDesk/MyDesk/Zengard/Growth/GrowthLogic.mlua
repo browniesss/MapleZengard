@@ -231,6 +231,8 @@ script GrowthLogic extends Logic
 			end
 		elseif resolution.kind == "EQUIP" then
 			_EquipmentLogic:GrantEquipment(senderUserId, resolution.id)
+		elseif resolution.kind == "UTILITY" then
+			self:GrantUtilityReward(senderUserId, resolution.id)
 		elseif resolution.kind == "FILLER" then
 			self:GrantFillerReward(senderUserId)
 		elseif resolution.kind == "COMPANION_JOB" then
@@ -406,6 +408,7 @@ script GrowthLogic extends Logic
 		local slotCount = state.choiceSlotCount
 		local equipChance = _EquipmentLogic:GetEquipmentAppearChance(state.userId)
 		local equipCap = _GrowthConfig:GetEquipCardCap(slotCount)
+		local utilityChance = _GrowthConfig:GetUtilityCardChance(slotCount)
 		local candidates = _SkillChoiceLogic:GetChoiceCandidates(state.userId, slotCount)
 		if state.forceAdvancedJobTier ~= nil and state.forceAdvancedJobTier >= 2 then
 			self:InjectAdvancedJobCandidate(state, candidates, state.forceAdvancedJobTier)
@@ -418,14 +421,25 @@ script GrowthLogic extends Logic
 		local cards = {}
 		local resolutions = {}
 		local equipCount = 0
+		local utilityCount = 0
 		local candIndex = 1
 		for slot = 1, slotCount do
-			local wantEquip = equipCount < equipCap and _UtilLogic:RandomDouble() < equipChance
+			local wantUtility = utilityCount < 1 and _UtilLogic:RandomDouble() < utilityChance
+			local wantEquip = not wantUtility and equipCount < equipCap and _UtilLogic:RandomDouble() < equipChance
 			if not wantEquip and candidates[candIndex] == nil and equipCount < equipCap then
 				-- D12 fallback: exhausted skill pool falls back to equipment first.
 				wantEquip = true
 			end
 			local made = false
+			if wantUtility then
+				local utility = self:DrawUtilityCard(state.userId)
+				if utility ~= nil and utility.id ~= nil then
+					utilityCount = utilityCount + 1
+					table.insert(cards, self:BuildUtilityCard(utility))
+					table.insert(resolutions, { kind = "UTILITY", id = utility.id })
+					made = true
+				end
+			end
 			if wantEquip then
 				local equipId = _EquipmentLogic:DrawEquipmentCard(state.userId)
 				if equipId ~= nil and equipId ~= "" then
@@ -728,6 +742,28 @@ script GrowthLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method table DrawUtilityCard(string userId)
+		-- Draws one immediate support reward; ids are stable and rewards are revalidated on pick.
+		local pool = _GrowthConfig:GetUtilityCardPool()
+		if pool == nil or #pool == 0 then
+			return nil
+		end
+		local card = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		log("[GrowthLogic] utility card drawn: user=" .. userId .. " id=" .. tostring(card.id))
+		return card
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildUtilityCard(table utility)
+		-- Converts a utility reward row into the shared choice-card display schema.
+		if utility == nil then
+			return self:BuildFillerCard()
+		end
+		local grade = utility.grade or "NORMAL"
+		return { choiceId = utility.id, kind = "FILLER", name = utility.name or "보급", desc = utility.desc or "즉시 보상을 획득합니다.", iconRuid = utility.iconRuid or "", grade = grade, flash = grade == "EPIC" }
+	end
+
+	@ExecSpace("ServerOnly")
 	method table BuildFillerCard()
 		-- D12 filler: small meso bonus card. Icon is the shared meso coin (UI_PALETTE §6).
 		local desc = "메소 " .. _GrowthConfig.FILLER_MESO_AMOUNT .. "을(를) 획득합니다."
@@ -738,6 +774,28 @@ script GrowthLogic extends Logic
 	method void GrantFillerReward(string userId)
 		-- Filler payout goes through the persistence gateway (C-24).
 		_PlayerDataLogic:AddCurrency(userId, "meso", _GrowthConfig.FILLER_MESO_AMOUNT)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantUtilityReward(string userId, string utilityId)
+		-- Applies one immediate support reward from GrowthConfig.GetUtilityCardPool.
+		for _, utility in ipairs(_GrowthConfig:GetUtilityCardPool()) do
+			if utility.id == utilityId then
+				if utility.effect == "LOOT" then
+					_LootLogic:AddLoot(userId, utility.amount or 1, "utility_card")
+				elseif utility.effect == "REROLL" then
+					_RerollLogic:GrantReroll(userId, utility.amount or 1, "utility_card")
+				elseif utility.effect == "MESO" then
+					_PlayerDataLogic:AddCurrency(userId, "meso", utility.amount or _GrowthConfig.FILLER_MESO_AMOUNT)
+				else
+					self:GrantFillerReward(userId)
+				end
+				log("[GrowthLogic] UtilityReward(" .. tostring(utilityId) .. ") user=" .. userId)
+				return
+			end
+		end
+		log_warning("[GrowthLogic] unknown utility reward: " .. tostring(utilityId))
+		self:GrantFillerReward(userId)
 	end
 
 	@ExecSpace("ServerOnly")

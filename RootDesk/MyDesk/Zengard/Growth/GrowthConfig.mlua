@@ -19,6 +19,10 @@ script GrowthConfig extends Logic
 
 	property integer FILLER_MESO_AMOUNT = 10
 
+	property number UTILITY_CARD_CHANCE_BASE = 0.12
+
+	property number UTILITY_CARD_CHANCE_EXPANDED = 0.18
+
 	method integer GetExpToNext(integer level)
 		if level <= 1 then
 			return 1
@@ -33,6 +37,23 @@ script GrowthConfig extends Logic
 			return 2
 		end
 		return 1
+	end
+
+	method number GetUtilityCardChance(integer slotCount)
+		-- Small chance for a tactical supply card in level-up offers; expanded sets feel more varied.
+		if slotCount >= self.EXPANDED_SLOT_COUNT then
+			return self.UTILITY_CARD_CHANCE_EXPANDED
+		end
+		return self.UTILITY_CARD_CHANCE_BASE
+	end
+
+	method table GetUtilityCardPool()
+		-- Immediate run-support cards. Effects are resolved in GrowthLogic so UI and rewards share ids.
+		return {
+			{ id = "supply_loot_cache", name = "전리품 상자", desc = "전리품 +2. 전직과 선택지 확장 타이밍을 앞당깁니다.", iconRuid = "ab37d9c03a2648468678e79ad7519326", grade = "RARE", effect = "LOOT", amount = 2 },
+			{ id = "supply_reroll_ticket", name = "리롤 티켓", desc = "리롤 +1. 다음 선택지를 다시 굴릴 여유를 얻습니다.", iconRuid = "thumbnail://4987142bef4b484298eb29c6f64b2f1e", grade = "RARE", effect = "REROLL", amount = 1 },
+			{ id = "supply_meso_cache", name = "메소 주머니", desc = "메소 +30. 메타 성장 재화를 조금 더 확보합니다.", iconRuid = "02a489cccff24a139a6c3582a5871f58", grade = "NORMAL", effect = "MESO", amount = 30 },
+		}
 	end
 
 	method integer GetAdvanceCost(integer targetTier)
