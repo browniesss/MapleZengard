@@ -123,6 +123,12 @@ script GrowthConfig extends Logic
 			eq_sniper_scope = { name = "스나이퍼 스코프", desc = "사거리와 치명타 확률이 함께 증가합니다." },
 			eq_holy_symbol_totem = { name = "홀리 심볼 토템", desc = "경험치와 전리품 획득량을 끌어올립니다." },
 			eq_combo_core = { name = "콤보 코어", desc = "공격력과 스킬 피해량이 동시에 증가합니다." },
+			eq_thunder_capacitor = { name = "썬더 캐패시터", desc = "시전 속도와 치명타 확률을 함께 끌어올립니다." },
+			eq_poison_vial = { name = "독안개 시험관", desc = "스킬 피해량과 전리품 기대값이 증가합니다." },
+			eq_wind_feather = { name = "바람 깃털", desc = "전투 행동 순환이 크게 빨라집니다." },
+			eq_precision_quiver = { name = "정밀 화살통", desc = "한 번에 더 많은 적을 노리고 치명타도 노립니다." },
+			eq_arcane_lens = { name = "아케인 렌즈", desc = "멀리 있는 적까지 주문 피해를 밀어 넣습니다." },
+			eq_boss_hunter_medal = { name = "보스 헌터 메달", desc = "공격력과 전리품 획득 기대값이 함께 증가합니다." },
 		}
 		local display = displays[equipId]
 		if display == nil then

@@ -536,6 +536,21 @@ script CombatLogic extends Logic
 			targetAdd = equip.targetAdd or 0,
 			atkSpeedMul = (equip.atkSpeedMul or 0) + (growth.atkSpeedMul or 0),
 		}
+		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
+			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
+			if passive ~= nil and passive.kind == "PASSIVE" then
+				local value = passive.passiveValuePerLv[entry.level]
+				if value ~= nil then
+					if passive.passiveType == "RANGE_ADD" then
+						bundle.rangeAdd = bundle.rangeAdd + value
+					elseif passive.passiveType == "TARGET_ADD" then
+						bundle.targetAdd = bundle.targetAdd + value
+					elseif passive.passiveType == "ATK_SPEED" then
+						bundle.atkSpeedMul = bundle.atkSpeedMul + value
+					end
+				end
+			end
+		end
 		self.statMulCache[ownerId] = bundle
 		return bundle
 	end

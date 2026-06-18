@@ -226,6 +226,9 @@ script UIChoicePopupLogic extends Logic
 	method void FillCard(Entity cardEntity, table card)
 		-- Renders one §4.9 card {choiceId, kind, name, desc, iconRuid, grade} onto a slot entity.
 		local grade = card.grade or "NORMAL"
+		if isvalid(cardEntity.UITransformComponent) then
+			cardEntity.UITransformComponent.UIScale = Vector3(1, 1, 1)
+		end
 		local nameText = cardEntity:GetChildByName("NameText", false)
 		if isvalid(nameText) then
 			nameText.TextComponent.Text = card.name or ""
@@ -236,7 +239,7 @@ script UIChoicePopupLogic extends Logic
 		end
 		local gradeText = cardEntity:GetChildByName("GradeText", false)
 		if isvalid(gradeText) then
-			gradeText.TextComponent.Text = grade
+			gradeText.TextComponent.Text = self:GetGradeLabel(grade)
 			gradeText.TextComponent.FontColor = self:GetGradeColor(grade)
 		end
 		cardEntity.SpriteGUIRendererComponent.Color = self:GetGradeColor(grade)
@@ -248,6 +251,31 @@ script UIChoicePopupLogic extends Logic
 		if isvalid(fx) then
 			fx.Enable = grade == "EPIC" or card.flash == true
 		end
+		if isvalid(nameText) then
+			nameText.TextComponent.FontColor = self:GetGradeTitleColor(grade)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetGradeLabel(string grade)
+		if grade == "EPIC" then
+			return "영웅"
+		end
+		if grade == "RARE" then
+			return "희귀"
+		end
+		return "일반"
+	end
+
+	@ExecSpace("ClientOnly")
+	method Color GetGradeTitleColor(string grade)
+		if grade == "EPIC" then
+			return Color.FromHexCode("#F5D0FE")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#BFDBFE")
+		end
+		return Color.FromHexCode("#F8FAFC")
 	end
 
 	@ExecSpace("ClientOnly")
@@ -341,11 +369,18 @@ script UIChoicePopupLogic extends Logic
 		if self.cardEntities == nil then
 			return
 		end
+		local pulse = 1.0
+		if enabled then
+			pulse = 1.0 + 0.045 * ((math.sin((0.75 - self.cardRefreshFxTime) * 24.0) + 1.0) * 0.5)
+		end
 		for _, cardEntity in ipairs(self.cardEntities) do
 			if isvalid(cardEntity) and cardEntity.Enable then
 				local fx = cardEntity:GetChildByName("Fx", false)
 				if isvalid(fx) then
 					fx.Enable = enabled
+				end
+				if isvalid(cardEntity.UITransformComponent) then
+					cardEntity.UITransformComponent.UIScale = Vector3(pulse, pulse, 1)
 				end
 			end
 		end

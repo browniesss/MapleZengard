@@ -125,6 +125,26 @@ script SkillDataLogic extends Logic
 			damagePerLv = { 5, 7, 10 }, critChanceBonus = 0.15,
 			desc = "멀리 있는 적을 흡수의 표창으로 공격하고 치명타 확률을 높입니다.",
 			iconRuid = "thumbnail://63af9dc845db4da2960172417b3eee5d" })
+		addSkill({ skillId = "warrior_weapon_booster", displayName = "웨폰 부스터", job = "warrior", kind = "PASSIVE",
+			jobTier = 2, advRoute = "",
+			passiveType = "ATK_SPEED", passiveValuePerLv = { 0.12, 0.18, 0.25 },
+			desc = "무기 운용을 가속해 다음 시전까지 걸리는 시간이 짧아집니다.",
+			iconRuid = "thumbnail://4987142bef4b484298eb29c6f64b2f1e" })
+		addSkill({ skillId = "archer_soul_arrow", displayName = "소울 애로우", job = "archer", kind = "PASSIVE",
+			jobTier = 2, advRoute = "",
+			passiveType = "RANGE_ADD", passiveValuePerLv = { 1, 1, 2 },
+			desc = "화살에 영혼의 힘을 담아 원거리 공격 사거리를 늘립니다.",
+			iconRuid = "thumbnail://64f775829e234918bd65e9d22214bb06" })
+		addSkill({ skillId = "mage_magic_booster", displayName = "매직 부스터", job = "mage", kind = "PASSIVE",
+			jobTier = 2, advRoute = "",
+			passiveType = "ATK_SPEED", passiveValuePerLv = { 0.12, 0.18, 0.25 },
+			desc = "마력 순환을 가속해 주문 시전 간격을 줄입니다.",
+			iconRuid = "thumbnail://ba512e50ddad4231bd6093dd07afc00e" })
+		addSkill({ skillId = "thief_haste", displayName = "헤이스트", job = "thief", kind = "PASSIVE",
+			jobTier = 2, advRoute = "",
+			passiveType = "ATK_SPEED", passiveValuePerLv = { 0.14, 0.22, 0.30 },
+			desc = "몸놀림이 빨라져 전투 행동 순환이 빨라집니다.",
+			iconRuid = "thumbnail://c9b9b0a008754947a164ab68fdd2eabd" })
 
 		-- Tier-3 skills. These are not just stronger FX: each one changes targeting, hit count, or passives.
 		addSkill({ skillId = "warrior_combo_attack", displayName = "콤보 어택", job = "warrior", kind = "ACTIVE",
@@ -157,6 +177,21 @@ script SkillDataLogic extends Logic
 			damagePerLv = { 3, 5, 7 }, linePierce = true, directional = true,
 			desc = "그림자 돌진으로 직선상의 적을 관통하며 세 번 베어냅니다.",
 			iconRuid = "thumbnail://c9b9b0a008754947a164ab68fdd2eabd" })
+		addSkill({ skillId = "warrior_final_attack", displayName = "파이널 어택", job = "warrior", kind = "PASSIVE",
+			jobTier = 3, advRoute = "",
+			passiveType = "DAMAGE_MUL", passiveValuePerLv = { 0.10, 0.16, 0.24 },
+			desc = "전사의 마무리 타격 감각이 깨어나 모든 공격 피해량이 증가합니다.",
+			iconRuid = "thumbnail://3cbc64d1f8564aeaa7585dc2e4699b3b" })
+		addSkill({ skillId = "archer_mortal_blow", displayName = "모탈 블로우", job = "archer", kind = "PASSIVE",
+			jobTier = 3, advRoute = "",
+			passiveType = "CRIT_CHANCE", passiveValuePerLv = { 0.12, 0.20, 0.30 },
+			desc = "급소를 노리는 감각이 강화되어 치명타 확률이 크게 증가합니다.",
+			iconRuid = "thumbnail://a053567708534e52a5d0f8fc64d1e8cd" })
+		addSkill({ skillId = "mage_element_amp", displayName = "엘리먼트 앰플리피케이션", job = "mage", kind = "PASSIVE",
+			jobTier = 3, advRoute = "",
+			passiveType = "DAMAGE_MUL", passiveValuePerLv = { 0.12, 0.18, 0.26 },
+			desc = "속성 마법의 위력을 증폭해 모든 주문 피해량이 증가합니다.",
+			iconRuid = "thumbnail://ca66b992cea9400eab7d6d202bcb7a60" })
 
 		-- Passive skills (one per job).
 		addSkill({ skillId = "warrior_power_mastery", displayName = "워리어 마스터리", job = "warrior", kind = "PASSIVE",

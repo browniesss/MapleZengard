@@ -37,6 +37,7 @@ script SkillStatLogic extends Logic
 			critChance = critChance + extraCritChance
 		end
 
+		local passiveDamageMul = 0.0
 		-- Passives apply only to skills of their own job (spec §3.3); companions hold none today.
 		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
 			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
@@ -47,9 +48,14 @@ script SkillStatLogic extends Logic
 						damage = damage + value
 					elseif passive.passiveType == "CRIT_CHANCE" then
 						critChance = critChance + value
+					elseif passive.passiveType == "DAMAGE_MUL" then
+						passiveDamageMul = passiveDamageMul + value
 					end
 				end
 			end
+		end
+		if passiveDamageMul > 0 then
+			damage = math.floor(damage * (1 + passiveDamageMul))
 		end
 
 		local isCritical = _UtilLogic:RandomDouble() < critChance
