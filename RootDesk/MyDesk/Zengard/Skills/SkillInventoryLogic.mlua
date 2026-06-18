@@ -51,6 +51,17 @@ script SkillInventoryLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method void InvalidateCombatStatBundle(string ownerId)
+		-- Range/target/attack-speed passives are cached by CombatLogic. Keep the helper local to
+		-- SkillInventoryLogic so skill changes can invalidate immediately without adding bus noise.
+		if _CombatLogic.statMulCache == nil then
+			_CombatLogic.statMulCache = {}
+		end
+		_CombatLogic.statMulCache[ownerId] = nil
+		log("[SkillInventory] combat stat cache invalidated: " .. tostring(ownerId))
+	end
+
+	@ExecSpace("ServerOnly")
 	method table GetOwnerState(string ownerId, boolean createIfMissing)
 		-- Per-owner state accessor; lazily creates the record for first grant.
 		local pool = self:GetInv()
@@ -105,6 +116,7 @@ script SkillInventoryLogic extends Logic
 			table.insert(state.castOrder, skillId)
 		end
 		log("[SkillInventory] GrantSkill: " .. ownerId .. " " .. skillId .. " Lv.1")
+		self:InvalidateCombatStatBundle(ownerId)
 		_SkillFusionLogic:RefreshFusionActivation(ownerId)
 		self:PushSkillState(ownerId)
 	end
@@ -123,6 +135,7 @@ script SkillInventoryLogic extends Logic
 		end
 		state.skills[skillId] = state.skills[skillId] + 1
 		log("[SkillInventory] LevelUpSkill: " .. ownerId .. " " .. skillId .. " Lv." .. tostring(state.skills[skillId]))
+		self:InvalidateCombatStatBundle(ownerId)
 		_SkillFusionLogic:RefreshFusionActivation(ownerId)
 		self:PushSkillState(ownerId)
 		return true
@@ -140,6 +153,7 @@ script SkillInventoryLogic extends Logic
 		self:RemoveFromList(state.ownedOrder, skillId)
 		self:RemoveFromList(state.castOrder, skillId)
 		log("[SkillInventory] RemoveSkill: " .. ownerId .. " " .. skillId)
+		self:InvalidateCombatStatBundle(ownerId)
 		_SkillFusionLogic:RefreshFusionActivation(ownerId)
 		self:PushSkillState(ownerId)
 	end
@@ -205,6 +219,7 @@ script SkillInventoryLogic extends Logic
 		_SkillFusionLogic:ResetUser(ownerId)
 		_SkillChoiceLogic:ResetUser(ownerId)
 		log("[SkillInventory] ResetUser: " .. ownerId)
+		self:InvalidateCombatStatBundle(ownerId)
 		self:PushSkillState(ownerId)
 	end
 
