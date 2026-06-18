@@ -381,7 +381,7 @@ script CombatFxLogic extends Logic
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayDamageSkin(integer col, integer row, integer damage, boolean isCritical)
+	method void PlayDamageSkin(integer col, integer row, integer damage, boolean isCritical, number elementMultiplier, string elementLabel)
 		-- DamageSkinService needs an Entity target, so the occupying monster is resolved client-side.
 		local target = self:FindMonsterEntityAt(col, row)
 		if target == nil then
@@ -389,10 +389,32 @@ script CombatFxLogic extends Logic
 		end
 		-- Crits pop larger (spec §E: 1.0 -> 1.3) so they read at a glance; normals stay at base size.
 		local skinScale = Vector2(0, 0)
+		local tweenType = DamageSkinTweenType.Default
 		if isCritical then
 			skinScale = Vector2(1.3, 1.3)
 		end
-		_DamageSkinService:Play(target, _CombatConfig.DAMAGE_SKIN_RUID, 0, { damage }, DamageSkinTweenType.Default, isCritical, Vector2(0, 0), skinScale, 1, 1, LitMode.Default)
+		if elementMultiplier ~= nil and elementMultiplier > 1.0 then
+			tweenType = DamageSkinTweenType.Volcano
+			if isCritical then
+				skinScale = Vector2(1.55, 1.55)
+			else
+				skinScale = Vector2(1.25, 1.25)
+			end
+		elseif elementMultiplier ~= nil and elementMultiplier < 1.0 then
+			tweenType = DamageSkinTweenType.DefaultMini
+			if isCritical then
+				skinScale = Vector2(1.05, 1.05)
+			else
+				skinScale = Vector2(0.82, 0.82)
+			end
+		end
+		_DamageSkinService:Play(target, _CombatConfig.DAMAGE_SKIN_RUID, 0, { damage }, tweenType, isCritical, Vector2(0, 0), skinScale, 1, 1, LitMode.Default)
+		if elementMultiplier ~= nil and elementMultiplier < 1.0 then
+			_DamageSkinService:PlayTextDamage(target, _CombatConfig.DAMAGE_SKIN_RUID, DamageSkinTextType.Resist, DamageSkinTweenType.DefaultMini, Vector2(0, 24), Vector2(0.9, 0.9), 1, 0.92, LitMode.Default)
+		end
+		if elementMultiplier ~= nil and elementMultiplier ~= 1.0 then
+			log("[CombatFxLogic] elemental damage skin: mul=" .. tostring(elementMultiplier) .. " label=" .. tostring(elementLabel) .. " damage=" .. tostring(damage) .. " crit=" .. tostring(isCritical))
+		end
 	end
 
 	@ExecSpace("ClientOnly")

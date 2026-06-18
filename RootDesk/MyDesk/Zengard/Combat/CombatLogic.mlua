@@ -510,7 +510,7 @@ script CombatLogic extends Logic
 			end
 			_MonsterLogic:ApplyDamage(monsterId, final, ownerId)
 			_CombatFxLogic:PlayHitFx(skillId, info.col, info.row)
-			_CombatFxLogic:PlayDamageSkin(info.col, info.row, final, hit.isCritical)
+			_CombatFxLogic:PlayDamageSkin(info.col, info.row, final, hit.isCritical, hit.elementMultiplier or 1.0, hit.elementLabel or "")
 		end
 		local after = _MonsterLogic:GetMonsterInfo(monsterId)
 		if after == nil or after.hp <= 0 then
