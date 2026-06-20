@@ -143,6 +143,12 @@ script SkillStatLogic extends Logic
 		if equip ~= nil and equip.extraActionChance ~= nil then
 			chance = chance + equip.extraActionChance
 		end
+		if _UserService:GetUserEntityByUserId(ownerId) ~= nil then
+			local outgameEquip = _OutgameEquipmentLogic:GetOutgameStatMultipliers(ownerId)
+			if outgameEquip ~= nil and outgameEquip.extraActionChance ~= nil then
+				chance = chance + outgameEquip.extraActionChance
+			end
+		end
 		if chance <= 0.0 then
 			return false
 		end
@@ -167,6 +173,12 @@ script SkillStatLogic extends Logic
 		local equip = _EquipmentLogic:GetEquipStatMultipliers(ownerId)
 		if equip ~= nil and equip.extraActionDamageMul ~= nil and equip.extraActionDamageMul > 0 then
 			mul = math.min(mul, equip.extraActionDamageMul)
+		end
+		if _UserService:GetUserEntityByUserId(ownerId) ~= nil then
+			local outgameEquip = _OutgameEquipmentLogic:GetOutgameStatMultipliers(ownerId)
+			if outgameEquip ~= nil and outgameEquip.extraActionDamageMul ~= nil and outgameEquip.extraActionDamageMul > 0 then
+				mul = math.min(mul, outgameEquip.extraActionDamageMul)
+			end
 		end
 		return mul
 	end

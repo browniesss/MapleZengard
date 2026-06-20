@@ -312,7 +312,7 @@ script CombatLogic extends Logic
 		local direction = self:ResolveDirection(cfg)
 		local stats = self:GetStatBundle(entry.ownerId, unit.isCompanion)
 		local targets = self:ResolveTargets(entry.skillId, skillData, cell, direction, cfg, stats)
-		if skillData.shape == "RANGED_TARGET" and #targets == 0 then
+		if self:IsRangedShape(skillData.shape) and #targets == 0 then
 			-- E-4: targeted skill with no candidate skips cast FX entirely.
 			log("[CombatLogic] cast skipped (no target in range): owner=" .. entry.ownerId .. " skill=" .. entry.skillId)
 			return
@@ -349,7 +349,7 @@ script CombatLogic extends Logic
 		-- Ranged/targeted skills (RANGED_TARGET: magic claw, double stab, lucky seven) land ON the
 		-- monster, so play the skill burst at each target cell — otherwise the effect only appears at
 		-- the caster's feet and reads as "the effect is in the wrong place".
-		if skillData.shape == "RANGED_TARGET" then
+		if self:IsRangedShape(skillData.shape) then
 			for _, targetId in ipairs(targets) do
 				local tinfo = _MonsterLogic:GetMonsterInfo(targetId)
 				if tinfo ~= nil then
@@ -378,9 +378,13 @@ script CombatLogic extends Logic
 		-- Returns an ordered monsterId list; dedupe by monsterId covers multi-cell occupants (E-6).
 		local targets = {}
 		local shape = skillData.shape
-		if shape == "RANGED_TARGET" then
+		if self:IsRangedShape(shape) then
 			local range = (skillData.range or 0) + stats.rangeAdd
-			local maxTargets = 1 + stats.targetAdd
+			local maxTargets = skillData.maxTargets or 1
+			if maxTargets < 1 then
+				maxTargets = 1
+			end
+			maxTargets += stats.targetAdd
 			local alive = _MonsterLogic:GetAliveMonsters()
 			local candidates = {}
 			for _, m in ipairs(alive) do
@@ -425,6 +429,55 @@ script CombatLogic extends Logic
 				end
 				return targets
 			end
+			if shape == "RANGED_SPLASH" then
+				local primary = nil
+				if cfg.mode == "MANUAL" and cfg.targetMonsterId ~= "" then
+					for _, m in ipairs(candidates) do
+						if m.monsterId == cfg.targetMonsterId then
+							primary = m
+							break
+						end
+					end
+				end
+				if primary == nil then
+					primary = candidates[1]
+				end
+				if primary == nil then
+					return targets
+				end
+				local splashRadius = skillData.splashRadius or 1
+				local primaryCol = primary["col"]
+				local primaryRow = primary["row"]
+				local splash = {}
+				for _, m in ipairs(alive) do
+					if _AttackPatternLogic:IsInRange(primaryCol, primaryRow, m["col"], m["row"], splashRadius) then
+						table.insert(splash, m)
+					end
+				end
+				table.sort(splash, function(a, b)
+					local da = math.max(math.abs(a["col"] - primaryCol), math.abs(a["row"] - primaryRow))
+					local db = math.max(math.abs(b["col"] - primaryCol), math.abs(b["row"] - primaryRow))
+					if da == db then
+						return a.monsterId < b.monsterId
+					end
+					return da < db
+				end)
+				for _, m in ipairs(splash) do
+					if #targets >= maxTargets then
+						break
+					end
+					table.insert(targets, m.monsterId)
+				end
+				return targets
+			elseif shape == "RANGED_CHAIN" then
+				for _, m in ipairs(candidates) do
+					if #targets >= maxTargets then
+						break
+					end
+					table.insert(targets, m.monsterId)
+				end
+				return targets
+			end
 			local picked = {}
 			if cfg.mode == "MANUAL" and cfg.targetMonsterId ~= "" then
 				-- D-11: MANUAL designated target wins the first slot; AUTO has no designation.
@@ -465,6 +518,12 @@ script CombatLogic extends Logic
 			targets = self:CollectMonstersInCells(cells, false)
 		end
 		return targets
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsRangedShape(string shape)
+		-- Groups all entity-targeted ranged variants for cast skip and impact FX handling.
+		return shape == "RANGED_TARGET" or shape == "RANGED_CHAIN" or shape == "RANGED_SPLASH"
 	end
 
 	@ExecSpace("ServerOnly")
@@ -540,15 +599,16 @@ script CombatLogic extends Logic
 			return cached
 		end
 		local equip = _EquipmentLogic:GetEquipStatMultipliers(ownerId)
+		local outgameEquip = _OutgameEquipmentLogic:GetOutgameStatMultipliers(ownerId)
 		local growth = _MetaGrowthLogic:GetGrowthMultipliers(ownerId)
 		local bundle = {
-			damageMul = (equip.atkMul or 0) + (equip.skillDmgMul or 0) + (growth.atkMul or 0),
-			critChanceAdd = equip.critChanceAdd or 0,
-			rangeAdd = equip.rangeAdd or 0,
-			targetAdd = equip.targetAdd or 0,
-			atkSpeedMul = (equip.atkSpeedMul or 0) + (growth.atkSpeedMul or 0),
-			elementDamageMul = equip.elementDamageMul or 0,
-			elementAdvantageDamageMul = equip.elementAdvantageDamageMul or 0,
+			damageMul = (equip.atkMul or 0) + (equip.skillDmgMul or 0) + (outgameEquip.atkMul or 0) + (outgameEquip.skillDmgMul or 0) + (growth.atkMul or 0),
+			critChanceAdd = (equip.critChanceAdd or 0) + (outgameEquip.critChanceAdd or 0),
+			rangeAdd = (equip.rangeAdd or 0) + (outgameEquip.rangeAdd or 0),
+			targetAdd = (equip.targetAdd or 0) + (outgameEquip.targetAdd or 0),
+			atkSpeedMul = (equip.atkSpeedMul or 0) + (outgameEquip.atkSpeedMul or 0) + (growth.atkSpeedMul or 0),
+			elementDamageMul = (equip.elementDamageMul or 0) + (outgameEquip.elementDamageMul or 0),
+			elementAdvantageDamageMul = (equip.elementAdvantageDamageMul or 0) + (outgameEquip.elementAdvantageDamageMul or 0),
 		}
 		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(ownerId)) do
 			local passive = _SkillDataLogic:GetSkillData(entry.skillId)

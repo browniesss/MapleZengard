@@ -1,0 +1,509 @@
+@Logic
+script OutgameEquipmentLogic extends Logic
+
+	property string SECTION_KEY = "outgameEquipment"
+
+	property string ClientEquipmentJson = ""
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Prototype account equipment is loaded lazily through PlayerDataLogic.
+		log("[OutgameEquipmentLogic] OnBeginPlay")
+	end
+
+	method table GetSlotKeys()
+		-- MapleStory-inspired primary visible equipment slots for the pre-game prototype.
+		return { "weapon", "hat", "overall", "glove", "shoes", "cape" }
+	end
+
+	method table GetSlotDef(string slotKey)
+		-- Returns display metadata for one equipment slot.
+		if self._T.slotDefs == nil then
+			self:BuildCatalog()
+		end
+		return self._T.slotDefs[slotKey]
+	end
+
+	method table GetItem(string itemId)
+		-- Returns an outgame equipment item by id.
+		if self._T.itemsById == nil then
+			self:BuildCatalog()
+		end
+		return self._T.itemsById[itemId]
+	end
+
+	method table GetItemsForSlot(string slotKey)
+		-- Returns the two prototype items assigned to a slot.
+		if self._T.itemsBySlot == nil then
+			self:BuildCatalog()
+		end
+		return self._T.itemsBySlot[slotKey] or {}
+	end
+
+	method table GetAllItems()
+		-- Returns the flat item catalog in display order.
+		if self._T.items == nil then
+			self:BuildCatalog()
+		end
+		return self._T.items
+	end
+
+	method void BuildCatalog()
+		-- Small fixed prototype catalog: six Maple-style slots, two items each.
+		local slotDefs = {
+			weapon = { key = "weapon", label = "무기", short = "WPN" },
+			hat = { key = "hat", label = "모자", short = "HAT" },
+			overall = { key = "overall", label = "한벌옷", short = "SUIT" },
+			glove = { key = "glove", label = "장갑", short = "GLV" },
+			shoes = { key = "shoes", label = "신발", short = "SHO" },
+			cape = { key = "cape", label = "망토", short = "CAP" },
+		}
+		local items = {
+			{ id = "og_weapon_old_gladius", slot = "weapon", name = "낡은 글라디우스", grade = "RARE", desc = "기본 공격 피해 +8%", iconRuid = "8dc53a706b0f4d16947870f96153ddb8", stats = { atkMul = 0.08 } },
+			{ id = "og_weapon_maple_staff", slot = "weapon", name = "단풍 지팡이", grade = "RARE", desc = "스킬 피해 +12%, 사거리 +1", iconRuid = "8b65f7c206ef459d8ed8cd5ff1d6e4b3", stats = { skillDmgMul = 0.12, rangeAdd = 1 } },
+			{ id = "og_hat_bronze_helm", slot = "hat", name = "브론즈 헬름", grade = "NORMAL", desc = "치명타 확률 +4%p", iconRuid = "thumbnail://3caa4d96acd74517829aa166f10e8a28", stats = { critChanceAdd = 0.04 } },
+			{ id = "og_hat_arcane_lens", slot = "hat", name = "아케인 렌즈", grade = "RARE", desc = "속성 스킬 피해 +10%", iconRuid = "thumbnail://598d2d1859e84eaab18ae460a0a1e0a4", stats = { elementDamageMul = 0.10 } },
+			{ id = "og_overall_training_suit", slot = "overall", name = "수련복", grade = "NORMAL", desc = "경험치 획득 +8%", iconRuid = "c6f24ead63214cd48c45385528ddd60d", stats = { expGainMul = 0.08 } },
+			{ id = "og_overall_guard_armor", slot = "overall", name = "가드 아머", grade = "RARE", desc = "피해 +5%, 아이템 드롭 +4%p", iconRuid = "754fc2f3e27d4917a3d3b1d9a599289d", stats = { atkMul = 0.05, lootDropAdd = 0.04 } },
+			{ id = "og_glove_work_gloves", slot = "glove", name = "공격의 목장갑", grade = "RARE", desc = "치명타 확률 +8%p", iconRuid = "ab2ee69e627f40a2bc559e40dd8bd1c0", stats = { critChanceAdd = 0.08 } },
+			{ id = "og_glove_combo_core", slot = "glove", name = "콤보 코어 장갑", grade = "EPIC", desc = "공격 속도 +8%, 스킬 피해 +6%", iconRuid = "754fc2f3e27d4917a3d3b1d9a599289d", stats = { atkSpeedMul = 0.08, skillDmgMul = 0.06 } },
+			{ id = "og_shoes_light_boots", slot = "shoes", name = "가벼운 부츠", grade = "NORMAL", desc = "공격 속도 +10%", iconRuid = "thumbnail://64f775829e234918bd65e9d22214bb06", stats = { atkSpeedMul = 0.10 } },
+			{ id = "og_shoes_hunter_boots", slot = "shoes", name = "헌터 부츠", grade = "RARE", desc = "아이템 드롭 +6%p", iconRuid = "ab37d9c03a2648468678e79ad7519326", stats = { lootDropAdd = 0.06 } },
+			{ id = "og_cape_shadow_cloak", slot = "cape", name = "그림자 망토", grade = "EPIC", desc = "추가 행동 +10%p, 추가 행동 피해 70%", iconRuid = "thumbnail://cc7f34b0c45d49679a7b9ffcd71341ee", stats = { extraActionChance = 0.10, extraActionDamageMul = 0.70 } },
+			{ id = "og_cape_holy_symbol", slot = "cape", name = "홀리 심볼 망토", grade = "RARE", desc = "경험치 +8%, 드롭 +5%p", iconRuid = "thumbnail://dcb4c7f7039147e0ac88ac981e9fafc9", stats = { expGainMul = 0.08, lootDropAdd = 0.05 } },
+		}
+		local byId = {}
+		local bySlot = {}
+		for _, slotKey in ipairs(self:GetSlotKeys()) do
+			bySlot[slotKey] = {}
+		end
+		for _, item in ipairs(items) do
+			byId[item.id] = item
+			if bySlot[item.slot] == nil then
+				bySlot[item.slot] = {}
+			end
+			table.insert(bySlot[item.slot], item)
+		end
+		self._T.slotDefs = slotDefs
+		self._T.items = items
+		self._T.itemsById = byId
+		self._T.itemsBySlot = bySlot
+	end
+
+	@ExecSpace("ServerOnly")
+	method table EnsureLoaded(string userId)
+		-- Loads and normalizes account equipment state once per user.
+		if self._T.states == nil then
+			self._T.states = {}
+		end
+		local state = self._T.states[userId]
+		if state ~= nil then
+			return state
+		end
+		local raw = _PlayerDataLogic:GetSection(userId, self.SECTION_KEY)
+		if _UtilLogic:IsNilorEmptyString(raw) or string.sub(raw, 1, 1) ~= "{" then
+			state = self:DefaultState()
+		else
+			state = self:NormalizeState(_HttpService:JSONDecode(raw))
+		end
+		self._T.states[userId] = state
+		log("[OutgameEquipmentLogic] state loaded: user=" .. userId .. " cubes=" .. tostring(state.cubeCount))
+		return state
+	end
+
+	@ExecSpace("ServerOnly")
+	method table DefaultState()
+		-- All prototype items are owned by default; first item in each slot starts equipped.
+		local state = { owned = {}, equipped = {}, cubeCount = 10000, potentials = {}, potentialRanks = {}, effectsEnabled = true }
+		for _, item in ipairs(self:GetAllItems()) do
+			state.owned[item.id] = 1
+			state.potentialRanks[item.id] = "RARE"
+			state.potentials[item.id] = self:RollPotentialLines(item, "RARE")
+		end
+		for _, slotKey in ipairs(self:GetSlotKeys()) do
+			local items = self:GetItemsForSlot(slotKey)
+			if items[1] ~= nil then
+				state.equipped[slotKey] = items[1].id
+			else
+				state.equipped[slotKey] = ""
+			end
+		end
+		return state
+	end
+
+	@ExecSpace("ServerOnly")
+	method table NormalizeState(table incoming)
+		-- Backward-compatible shape repair for old saves without cubes or potentials.
+		local state = self:DefaultState()
+		if incoming == nil then
+			return state
+		end
+		if incoming.cubeCount ~= nil then
+			state.cubeCount = incoming.cubeCount
+		end
+		if incoming.effectsEnabled == false then
+			state.effectsEnabled = false
+		else
+			state.effectsEnabled = true
+		end
+		if incoming.owned ~= nil then
+			for itemId, owned in pairs(incoming.owned) do
+				if self:GetItem(itemId) ~= nil and owned == 1 then
+					state.owned[itemId] = 1
+				end
+			end
+		end
+		if incoming.equipped ~= nil then
+			for _, slotKey in ipairs(self:GetSlotKeys()) do
+				local itemId = incoming.equipped[slotKey]
+				local item = self:GetItem(itemId or "")
+				if item ~= nil and item.slot == slotKey and state.owned[itemId] == 1 then
+					state.equipped[slotKey] = itemId
+				end
+			end
+		end
+		if incoming.potentialRanks ~= nil and incoming.potentials ~= nil then
+			for _, item in ipairs(self:GetAllItems()) do
+				local rank = incoming.potentialRanks[item.id]
+				local lines = incoming.potentials[item.id]
+				if self:IsValidPotentialRank(rank) and lines ~= nil and #lines >= 3 then
+					state.potentialRanks[item.id] = rank
+					state.potentials[item.id] = lines
+				end
+			end
+		end
+		return state
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveState(string userId)
+		-- Persists through PlayerDataLogic's section gateway and debounce flush.
+		local state = self._T.states ~= nil and self._T.states[userId] or nil
+		if state == nil then
+			return
+		end
+		_PlayerDataLogic:SetSection(userId, self.SECTION_KEY, _HttpService:JSONEncode(state))
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetOutgameStatMultipliers(string userId)
+		-- Returns account equipment multipliers for combat, exp, loot, and extra-action systems.
+		local state = self:EnsureLoaded(userId)
+		local result = self:NewMultiplierTable()
+		if state.effectsEnabled == false then
+			return result
+		end
+		for _, slotKey in ipairs(self:GetSlotKeys()) do
+			local itemId = state.equipped[slotKey] or ""
+			local item = self:GetItem(itemId)
+			if item ~= nil then
+				self:AddStats(result, item.stats)
+				self:AddPotentialStats(result, state.potentials[itemId])
+			end
+		end
+		return result
+	end
+
+	method void AddStats(table result, table stats)
+		-- Adds stat fields while preserving reduced-damage semantics for extra actions.
+		if stats == nil then
+			return
+		end
+		for statKey, value in pairs(stats) do
+			if statKey == "extraActionDamageMul" then
+				if result[statKey] <= 0 then
+					result[statKey] = value
+				else
+					result[statKey] = math.min(result[statKey], value)
+				end
+			else
+				result[statKey] = (result[statKey] or 0) + value
+			end
+		end
+	end
+
+	method void AddPotentialStats(table result, table lines)
+		-- Adds every potential line's stat table to an aggregate stat bundle.
+		if lines == nil then
+			return
+		end
+		for _, line in ipairs(lines) do
+			self:AddStats(result, line.stats)
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestSyncOutgameEquipment()
+		-- Client pull: sends account equipment state to the requesting client.
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			log_warning("[OutgameEquipmentLogic] sync skipped: empty senderUserId")
+			return
+		end
+		self:EnsureLoaded(userId)
+		self:PushState(userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestEquipOutgameItem(string itemId)
+		-- Server validates ownership and slot compatibility before changing the loadout.
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			return
+		end
+		local item = self:GetItem(itemId)
+		if item == nil then
+			self:NotifyEquipDenied("알 수 없는 장비입니다.", userId)
+			return
+		end
+		local state = self:EnsureLoaded(userId)
+		if state.owned[itemId] ~= 1 then
+			self:NotifyEquipDenied("아직 보유하지 않은 장비입니다.", userId)
+			return
+		end
+		state.equipped[item.slot] = itemId
+		self:SaveState(userId)
+		self:ClearCombatCache(userId)
+		self:PushState(userId)
+		log("[OutgameEquipmentLogic] equipped: user=" .. userId .. " item=" .. itemId .. " slot=" .. item.slot)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetOutgameEquipmentEffectsEnabled(boolean enabled)
+		-- Persists prototype balance toggle and invalidates every runtime stat cache that reads it.
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			return
+		end
+		local state = self:EnsureLoaded(userId)
+		state.effectsEnabled = enabled
+		self:SaveState(userId)
+		self:ClearCombatCache(userId)
+		self:PushState(userId)
+		self:NotifyEquipmentEffectToggle(enabled, userId)
+		log("[OutgameEquipmentLogic] effects enabled changed: user=" .. userId .. " enabled=" .. tostring(enabled))
+	end
+
+	@ExecSpace("Server")
+	method void RequestCubeOutgameItem(string itemId)
+		-- Consumes one prototype cube and rerolls the target equipment's potential lines.
+		local userId = senderUserId
+		if userId == nil or userId == "" then
+			return
+		end
+		local item = self:GetItem(itemId)
+		if item == nil then
+			self:NotifyEquipDenied("큐브를 사용할 장비가 없습니다.", userId)
+			return
+		end
+		local state = self:EnsureLoaded(userId)
+		if state.owned[itemId] ~= 1 then
+			self:NotifyEquipDenied("보유하지 않은 장비에는 큐브를 사용할 수 없습니다.", userId)
+			return
+		end
+		if (state.cubeCount or 0) <= 0 then
+			self:NotifyEquipDenied("큐브가 부족합니다.", userId)
+			return
+		end
+		local currentRank = state.potentialRanks[itemId] or "RARE"
+		local nextRank = self:MaybeTierUp(currentRank)
+		state.cubeCount = state.cubeCount - 1
+		state.potentialRanks[itemId] = nextRank
+		state.potentials[itemId] = self:RollPotentialLines(item, nextRank)
+		self:SaveState(userId)
+		self:ClearCombatCache(userId)
+		self:PushState(userId)
+		self:NotifyCubeResult(item.id, item.name, currentRank, nextRank, state.cubeCount, userId)
+		log("[OutgameEquipmentLogic] cubed: user=" .. userId .. " item=" .. itemId .. " rank=" .. nextRank .. " cubes=" .. tostring(state.cubeCount))
+	end
+
+	method void ClearCombatCache(string userId)
+		-- Clears cached equipment multipliers after equipment or potential changes.
+		if _CombatLogic.statMulCache ~= nil then
+			_CombatLogic.statMulCache[userId] = nil
+		end
+	end
+
+	method boolean IsValidPotentialRank(string rank)
+		-- Checks whether a persisted potential rank is known.
+		return rank == "RARE" or rank == "EPIC" or rank == "UNIQUE" or rank == "LEGENDARY"
+	end
+
+	method string GetRankLabel(string rank)
+		-- Converts an internal potential rank key to Korean UI text.
+		if rank == "LEGENDARY" then
+			return "레전드리"
+		elseif rank == "UNIQUE" then
+			return "유니크"
+		elseif rank == "EPIC" then
+			return "에픽"
+		end
+		return "레어"
+	end
+
+	method string GetLowerRank(string rank)
+		-- Returns the previous rank used for second and third line downgrade rolls.
+		if rank == "LEGENDARY" then
+			return "UNIQUE"
+		elseif rank == "UNIQUE" then
+			return "EPIC"
+		end
+		return "RARE"
+	end
+
+	method string GetNextRank(string rank)
+		-- Returns the next potential rank, capped at Legendary.
+		if rank == "RARE" then
+			return "EPIC"
+		elseif rank == "EPIC" then
+			return "UNIQUE"
+		elseif rank == "UNIQUE" then
+			return "LEGENDARY"
+		end
+		return "LEGENDARY"
+	end
+
+	method string MaybeTierUp(string currentRank)
+		-- Uses prototype-friendly tier-up rates so testing can see progression quickly.
+		if currentRank == "LEGENDARY" then
+			return currentRank
+		end
+		local chance = 0.15
+		if currentRank == "EPIC" then
+			chance = 0.08
+		elseif currentRank == "UNIQUE" then
+			chance = 0.035
+		end
+		if math.random() < chance then
+			return self:GetNextRank(currentRank)
+		end
+		return currentRank
+	end
+
+	method table RollPotentialLines(table item, string rank)
+		-- Rolls three Maple-style potential lines for a piece of equipment.
+		local lines = {}
+		for index = 1, 3 do
+			local lineRank = rank
+			if index == 2 and math.random() >= 0.25 then
+				lineRank = self:GetLowerRank(rank)
+			elseif index == 3 and math.random() >= 0.10 then
+				lineRank = self:GetLowerRank(rank)
+			end
+			table.insert(lines, self:RollPotentialLine(item.slot, lineRank))
+		end
+		return lines
+	end
+
+	method table RollPotentialLine(string slotKey, string rank)
+		-- Picks one potential option from a rank and slot-aware option pool.
+		local pool = self:GetPotentialPool(rank, slotKey)
+		local index = math.random(1, #pool)
+		local picked = pool[index]
+		return { key = picked.key, rank = rank, label = picked.label, stats = picked.stats }
+	end
+
+	method table GetPotentialPool(string rank, string slotKey)
+		-- Builds a compact prototype potential option pool.
+		local common = {
+			RARE = {
+				{ key = "atk3", label = "피해 +3%", stats = { atkMul = 0.03 } },
+				{ key = "spd3", label = "공격 속도 +3%", stats = { atkSpeedMul = 0.03 } },
+				{ key = "crit3", label = "치명타 +3%p", stats = { critChanceAdd = 0.03 } },
+				{ key = "exp3", label = "경험치 +3%", stats = { expGainMul = 0.03 } },
+			},
+			EPIC = {
+				{ key = "atk6", label = "피해 +6%", stats = { atkMul = 0.06 } },
+				{ key = "skill6", label = "스킬 피해 +6%", stats = { skillDmgMul = 0.06 } },
+				{ key = "crit6", label = "치명타 +6%p", stats = { critChanceAdd = 0.06 } },
+				{ key = "drop5", label = "드롭 +5%p", stats = { lootDropAdd = 0.05 } },
+			},
+			UNIQUE = {
+				{ key = "atk9", label = "피해 +9%", stats = { atkMul = 0.09 } },
+				{ key = "skill9", label = "스킬 피해 +9%", stats = { skillDmgMul = 0.09 } },
+				{ key = "speed8", label = "공격 속도 +8%", stats = { atkSpeedMul = 0.08 } },
+				{ key = "range1", label = "사거리 +1", stats = { rangeAdd = 1 } },
+			},
+			LEGENDARY = {
+				{ key = "atk12", label = "피해 +12%", stats = { atkMul = 0.12 } },
+				{ key = "skill15", label = "스킬 피해 +15%", stats = { skillDmgMul = 0.15 } },
+				{ key = "extra8", label = "추가 행동 +8%p", stats = { extraActionChance = 0.08, extraActionDamageMul = 0.75 } },
+				{ key = "target1", label = "타겟 수 +1", stats = { targetAdd = 1 } },
+			},
+		}
+		local pool = common[rank] or common.RARE
+		if slotKey == "weapon" and rank ~= "RARE" then
+			table.insert(pool, { key = "weapon_boss", label = "정예 피해 +10%", stats = { elementAdvantageDamageMul = 0.10 } })
+		elseif slotKey == "cape" and rank == "LEGENDARY" then
+			table.insert(pool, { key = "cape_shadow", label = "그림자 연계 +10%p", stats = { extraActionChance = 0.10, extraActionDamageMul = 0.70 } })
+		elseif slotKey == "shoes" then
+			table.insert(pool, { key = "shoes_speed", label = "공격 속도 +5%", stats = { atkSpeedMul = 0.05 } })
+		end
+		return pool
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushState(string userId)
+		-- Sends a state snapshot to one client; the catalog stays local in code.
+		local state = self._T.states ~= nil and self._T.states[userId] or nil
+		if state == nil then
+			return
+		end
+		self:SyncOutgameEquipmentState(_HttpService:JSONEncode(state), userId)
+	end
+
+	@ExecSpace("Client")
+	method void SyncOutgameEquipmentState(string stateJson)
+		-- Client-side cache for UIOutgameEquipmentPopupLogic.
+		self.ClientEquipmentJson = stateJson
+		log("[OutgameEquipmentLogic] state synced (client)")
+	end
+
+	@ExecSpace("Client")
+	method void NotifyEquipDenied(string reason)
+		-- Surfaces server-side validation failures in the current UI toast layer.
+		_UIToastLogic:ShowMessage(reason)
+	end
+
+	@ExecSpace("Client")
+	method void NotifyCubeResult(string itemId, string itemName, string oldRank, string newRank, integer cubeCount)
+		-- Surfaces successful cube rolls through toast and the equipment popup.
+		local message = itemName .. " 잠재능력 재설정 완료"
+		if oldRank ~= newRank then
+			message = itemName .. " " .. self:GetRankLabel(oldRank) .. " → " .. self:GetRankLabel(newRank) .. " 승급!"
+		end
+		_UIToastLogic:ShowMessage(message)
+		if _UIOutgameEquipmentPopupLogic ~= nil then
+			_UIOutgameEquipmentPopupLogic:ApplyCubeResult(itemId, itemName, oldRank, newRank, cubeCount, message)
+		end
+	end
+
+	@ExecSpace("Client")
+	method void NotifyEquipmentEffectToggle(boolean enabled)
+		-- Confirms the prototype balance toggle to the owning client.
+		if enabled then
+			_UIToastLogic:ShowMessage("장비 효과가 적용됩니다.")
+		else
+			_UIToastLogic:ShowMessage("장비 효과를 끕니다. 장착과 큐브 상태는 유지됩니다.")
+		end
+	end
+
+	method table NewMultiplierTable()
+		-- Full multiplier schema shared with run equipment and meta growth.
+		return {
+			atkMul = 0,
+			atkSpeedMul = 0,
+			skillDmgMul = 0,
+			critChanceAdd = 0,
+			rangeAdd = 0,
+			targetAdd = 0,
+			expGainMul = 0,
+			lootDropAdd = 0,
+			extraActionChance = 0,
+			extraActionDamageMul = 0,
+			elementDamageMul = 0,
+			elementAdvantageDamageMul = 0,
+		}
+	end
+
+end

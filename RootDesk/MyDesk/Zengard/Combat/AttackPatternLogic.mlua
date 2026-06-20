@@ -24,6 +24,30 @@ script AttackPatternLogic extends Logic
 					end
 				end
 			end
+		elseif shape == "CROSS2" then
+			for dist = 1, 2 do
+				self:PushIfInside(cells, col, row + dist)
+				self:PushIfInside(cells, col, row - dist)
+				self:PushIfInside(cells, col - dist, row)
+				self:PushIfInside(cells, col + dist, row)
+			end
+		elseif shape == "FRONT_ARC" then
+			local delta = self:DirectionToDelta(direction)
+			if delta.dc ~= 0 or delta.dr ~= 0 then
+				local perp = { dc = -delta.dr, dr = delta.dc }
+				self:PushIfInside(cells, col + delta.dc, row + delta.dr)
+				self:PushIfInside(cells, col + delta.dc + perp.dc, row + delta.dr + perp.dr)
+				self:PushIfInside(cells, col + delta.dc - perp.dc, row + delta.dr - perp.dr)
+				self:PushIfInside(cells, col + delta.dc * 2, row + delta.dr * 2)
+			end
+		elseif shape == "RING2" then
+			for dc = -2, 2 do
+				for dr = -2, 2 do
+					if not (dc == 0 and dr == 0) and math.max(math.abs(dc), math.abs(dr)) <= 2 then
+						self:PushIfInside(cells, col + dc, row + dr)
+					end
+				end
+			end
 		elseif shape == "LINE" then
 			-- Near-to-far order matters: non-pierce LINE stops at the first occupied cell.
 			-- equip rangeAdd is not applied here — base LINE range 7 already exceeds the 7x7 board span.

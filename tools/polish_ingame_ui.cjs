@@ -113,45 +113,45 @@ function ensureText(b, id, text, options) {
   tx(b, "ControlPanel/TargetStateText", { FontSize: 13, MinSize: 10, MaxSize: 14, FontColor: col(0.86, 0.94, 1, 1) });
   tx(b, "ControlPanel/TargetBtn", { FontSize: 17, MinSize: 13, MaxSize: 18, Bold: true, FontColor: col(1, 0.92, 0.74, 1) });
 
-  b.patch("SkillOrderPanel", { anchor: "bottom-left", pos: [28, 228], rect_size: [456, 252], pivot: [0, 0] });
-  sp(b, "SkillOrderPanel", { Color: col(0.012, 0.014, 0.018, 0.9), Type: 1, DropShadow: true, DropShadowDistance: 2 });
-  b.patch("SkillOrderPanel/OrderTitleText", { pos: [0, 106], rect_size: [398, 28], pivot: [0.5, 0.5] });
-  tx(b, "SkillOrderPanel/OrderTitleText", { Text: "\uC2A4\uD0AC \uC21C\uC11C", FontSize: 16, MinSize: 13, MaxSize: 17, Bold: true, FontColor: col(1, 0.84, 0.3, 1) });
-  const xs = [-112, 112, -112, 112, -112, 112, -112, 112];
-  const ys = [66, 66, 18, 18, -30, -30, -78, -78];
+  b.patch("SkillOrderPanel", { anchor: "top-left", pos: [122, -315], rect_size: [220, 520], pivot: [0.5, 0.5] });
+  sp(b, "SkillOrderPanel", { Color: col(0.012, 0.014, 0.018, 0.82), Type: 1, DropShadow: true, DropShadowDistance: 2 });
+  b.patch("SkillOrderPanel/OrderTitleText", { anchor: "top-center", pos: [0, -34], rect_size: [190, 38], pivot: [0.5, 0.5] });
+  tx(b, "SkillOrderPanel/OrderTitleText", { Text: "\uC2A4\uD0AC \uC21C\uC11C", FontSize: 18, MinSize: 14, MaxSize: 20, Bold: true, FontColor: col(1, 0.84, 0.3, 1), Alignment: 4, Overflow: 2 });
+  const ys = [-86, -140, -194, -248, -302, -356, -410, -464];
   for (let i = 1; i <= 8; i += 1) {
     const id = `SkillOrderPanel/Slot${i}Btn`;
-    b.patch(id, { pos: [xs[i - 1], ys[i - 1]], rect_size: [204, 42] });
-    sp(b, id, { Color: col(0.13, 0.09, 0.055, 0.98), Type: 1, DropShadow: true, DropShadowDistance: 1 });
+    b.patch(id, { anchor: "top-center", pos: [0, ys[i - 1]], rect_size: [184, 46], pivot: [0.5, 0.5] });
+    sp(b, id, { Color: col(0.13, 0.09, 0.055, 0.98), Type: 1, DropShadow: true, DropShadowDistance: 1, RaycastTarget: true });
     tx(b, id, { Text: "", FontSize: 1, MinSize: 1, MaxSize: 1, FontColor: col(1, 1, 1, 0) });
+    b.upsertComponent(id, "MOD.Core.UITouchReceiveComponent", { "@type": "MOD.Core.UITouchReceiveComponent", Enable: true });
     try {
       b.getId(`${id}/Icon`);
-      b.patch(`${id}/Icon`, { anchor: "middle-left", pos: [10, 0], rect_size: [32, 32], pivot: [0, 0.5] });
+      b.patch(`${id}/Icon`, { anchor: "middle-left", pos: [8, 0], rect_size: [26, 26], pivot: [0, 0.5] });
     } catch (_) {
-      b.sprite(`${id}/Icon`, { anchor: "middle-left", pos: [10, 0], rect_size: [32, 32], pivot: [0, 0.5], raycast: false });
+      b.sprite(`${id}/Icon`, { anchor: "middle-left", pos: [8, 0], rect_size: [26, 26], pivot: [0, 0.5], raycast: false });
     }
     sp(b, `${id}/Icon`, { Color: col(1, 1, 1, 1), PreserveAspect: true, RaycastTarget: false });
     try {
       b.getId(`${id}/OrderBadge`);
-      b.patch(`${id}/OrderBadge`, { anchor: "middle-left", pos: [48, 0], rect_size: [26, 26], pivot: [0, 0.5] });
+      b.patch(`${id}/OrderBadge`, { anchor: "middle-left", pos: [38, 0], rect_size: [22, 22], pivot: [0, 0.5] });
     } catch (_) {
-      b.sprite(`${id}/OrderBadge`, { anchor: "middle-left", pos: [48, 0], rect_size: [26, 26], pivot: [0, 0.5], raycast: false });
+      b.sprite(`${id}/OrderBadge`, { anchor: "middle-left", pos: [38, 0], rect_size: [22, 22], pivot: [0, 0.5], raycast: false });
     }
     sp(b, `${id}/OrderBadge`, { Color: col(0.95, 0.74, 0.24, 0.95), Type: 1, RaycastTarget: false });
     try {
       b.getId(`${id}/OrderText`);
-      b.patch(`${id}/OrderText`, { anchor: "middle-left", pos: [48, 0], rect_size: [26, 26], pivot: [0, 0.5] });
+      b.patch(`${id}/OrderText`, { anchor: "middle-left", pos: [32, 0], rect_size: [34, 32], pivot: [0, 0.5] });
     } catch (_) {
-      b.text(`${id}/OrderText`, "", { anchor: "middle-left", pos: [48, 0], rect_size: [26, 26], pivot: [0, 0.5] });
+      b.text(`${id}/OrderText`, "", { anchor: "middle-left", pos: [32, 0], rect_size: [34, 32], pivot: [0, 0.5] });
     }
     tx(b, `${id}/OrderText`, { FontSize: 12, MinSize: 9, MaxSize: 13, Bold: true, FontColor: col(0.08, 0.05, 0.02, 1) });
     try {
       b.getId(`${id}/Label`);
-      b.patch(`${id}/Label`, { anchor: "middle-left", pos: [80, 0], rect_size: [116, 34], pivot: [0, 0.5] });
+      b.patch(`${id}/Label`, { anchor: "middle-left", pos: [66, 0], rect_size: [112, 38], pivot: [0, 0.5] });
     } catch (_) {
-      b.text(`${id}/Label`, "", { anchor: "middle-left", pos: [80, 0], rect_size: [116, 34], pivot: [0, 0.5] });
+      b.text(`${id}/Label`, "", { anchor: "middle-left", pos: [66, 0], rect_size: [112, 38], pivot: [0, 0.5] });
     }
-    tx(b, `${id}/Label`, { FontSize: 12, MinSize: 9, MaxSize: 13, Bold: true, FontColor: col(1, 0.93, 0.72, 1), Alignment: 3, Overflow: 2 });
+    tx(b, `${id}/Label`, { FontSize: 13, MinSize: 9, MaxSize: 14, Bold: true, FontColor: col(1, 0.93, 0.72, 1), Alignment: 3, Overflow: 2 });
     btn(b, id);
   }
   b.write("ui/CombatControlHUDGroup.ui");

@@ -22,7 +22,10 @@ script UILobbyLogic extends Logic
 	-- "게임 시작" primary CTA → StageSelect; bottom "내실" button → MetaGrowth popup.
 	property Entity gameStartBtn = "32404c1b-3436-4658-99b7-88e0581c5081"
 
-	property Entity btnGrowth = "e89d32ec-9840-4174-b4aa-399eaf6d041e"
+	property Entity btnGrowth = "3b7136fe-62a5-4d06-ab78-dda8966b7d11"
+
+	-- Pre-game equipment loadout popup. Bound to the former Dex menu tile in LobbyGroup.
+	property Entity btnEquipment = "e89d32ec-9840-4174-b4aa-399eaf6d041e"
 
 	-- 최근 진행 card: last-played stage + 이어서 하기. Backed by ModeStageLogic.ClientProgress.
 	property Entity btnContinue = "5fa90f90-3f5e-4288-a404-f5be73e24177"
@@ -122,7 +125,7 @@ script UILobbyLogic extends Logic
 		if not isvalid(self.btnStory) or not isvalid(self.btnChallenge) or not isvalid(self.btnTimeAttack) then
 			return false
 		end
-		if not isvalid(self.gameStartBtn) or not isvalid(self.btnContinue) or not isvalid(self.btnGrowth) then
+		if not isvalid(self.gameStartBtn) or not isvalid(self.btnContinue) or not isvalid(self.btnGrowth) or not isvalid(self.btnEquipment) then
 			return false
 		end
 		self:WireModeButton(self.btnStory, "STORY")
@@ -154,6 +157,12 @@ script UILobbyLogic extends Logic
 			_UIMetaGrowthPopupLogic:Open()
 		end)
 		table.insert(self.eventRecords, { target = self.btnGrowth, evType = ButtonClickEvent, evHandler = growthHandler })
+		local equipmentHandler = self.btnEquipment:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.CLICK_SFX_RUID, 1)
+			log("[UILobbyLogic] open 장비")
+			_UIOutgameEquipmentPopupLogic:Open()
+		end)
+		table.insert(self.eventRecords, { target = self.btnEquipment, evType = ButtonClickEvent, evHandler = equipmentHandler })
 	end
 
 	method void OnContinueClicked()

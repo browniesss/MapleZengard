@@ -106,12 +106,21 @@ script UIJobAdvancePopupLogic extends Logic
 		self.isOpen = true
 		if isvalid(self.popupRoot) then
 			self.popupRoot.Enable = true
+			self:BringPopupToFront()
 		end
 		self:UpdateCelebrationFx(0)
 		if not wasOpen then
 			_UIRouterLogic:ApplyModalHudOcclusion(true)
 		end
 		log("[UIJobAdvancePopupLogic] show job advance: tier=" .. tier .. " job=" .. jobName)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BringPopupToFront()
+		-- Keeps the advancement celebration above the still-open card choice popup.
+		if isvalid(self.popupRoot) and isvalid(self.popupRoot.UITransformComponent) then
+			_UILogic:SetSiblingIndex(self.popupRoot.UITransformComponent, 1000000)
+		end
 	end
 
 	@ExecSpace("ClientOnly")

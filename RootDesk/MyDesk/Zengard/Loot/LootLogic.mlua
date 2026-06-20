@@ -56,8 +56,9 @@ script LootLogic extends Logic
 		end
 		local userId = event.attackerUserId
 		local equipMul = _EquipmentLogic:GetEquipStatMultipliers(userId)
+		local outgameMul = _OutgameEquipmentLogic:GetOutgameStatMultipliers(userId)
 		local growthMul = _MetaGrowthLogic:GetGrowthMultipliers(userId)
-		local lootChance = _EquipmentBalance.LOOT_DROP_CHANCE_NORMAL + equipMul.lootDropAdd + growthMul.lootDropAdd
+		local lootChance = _EquipmentBalance.LOOT_DROP_CHANCE_NORMAL + equipMul.lootDropAdd + outgameMul.lootDropAdd + growthMul.lootDropAdd
 		if _UtilLogic:RandomDouble() < lootChance then
 			self:AddLoot(userId, 1, "drop")
 		end

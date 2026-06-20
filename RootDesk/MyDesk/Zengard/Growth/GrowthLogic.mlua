@@ -69,6 +69,10 @@ script GrowthLogic extends Logic
 		if equipStats ~= nil and equipStats.expGainMul ~= nil then
 			expGainMul = expGainMul + equipStats.expGainMul
 		end
+		local outgameStats = _OutgameEquipmentLogic:GetOutgameStatMultipliers(userId)
+		if outgameStats ~= nil and outgameStats.expGainMul ~= nil then
+			expGainMul = expGainMul + outgameStats.expGainMul
+		end
 		for _, entry in ipairs(_SkillInventoryLogic:GetOwnedSkills(userId)) do
 			local passive = _SkillDataLogic:GetSkillData(entry.skillId)
 			if passive ~= nil and passive.kind == "PASSIVE" and passive.passiveType == "EXP_GAIN" then
@@ -292,17 +296,12 @@ script GrowthLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void NotifyJobRouteLocked(string userId, table state)
-		-- Replays the advancement celebration with the branch name once the guaranteed tier-2 skill locks the mage route.
+		-- Route lock happens after the advancement modal is already acknowledged.
+		-- Do not replay JobAdvancedEvent here; it re-opens the success modal on the next skill pick.
 		if state == nil or state.jobTier < 2 or state.routeBranch == "" then
 			return
 		end
-		local ev = JobAdvancedEvent()
-		ev.userId = userId
-		ev.jobKey = state.jobKey
-		ev.newTier = state.jobTier
-		ev.branch = state.routeBranch
-		_ZengardGameLogic:SendGameEvent(ev)
-		log("[GrowthLogic] JobRouteLockedEvent tier=" .. tostring(state.jobTier) .. " branch=" .. state.routeBranch .. " user=" .. userId)
+		log("[GrowthLogic] JobRouteLocked tier=" .. tostring(state.jobTier) .. " branch=" .. state.routeBranch .. " user=" .. userId)
 	end
 
 	@ExecSpace("Server")

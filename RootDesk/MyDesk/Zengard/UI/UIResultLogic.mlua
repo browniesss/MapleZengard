@@ -263,6 +263,9 @@ script UIResultLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ShowResult(StageEndedEvent event)
+		-- ShowResult can be called from the normal StageEnded path or from QA/dev scripts.
+		-- Make the method self-contained so the deferred visibility guard cannot drop the popup.
+		self.resultOpen = true
 		-- Clear/fail branch per spec §4.8; stats payload schema is fixed by C-19.
 		local stats = event.stats or {}
 		local stageId = stats.stageId or self.lastStageId

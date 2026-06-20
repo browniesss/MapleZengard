@@ -15,6 +15,8 @@ script CombatFxLogic extends Logic
 	-- the monster's cell (verified in play: 1.0 was too faint, 2.5 swamped neighbours).
 	property number impactEffectScale = 1.5
 
+	property integer hitStopTimerId = 0
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- Preload the damage skin so the first cast does not hitch (E-15).
@@ -56,7 +58,10 @@ script CombatFxLogic extends Logic
 		elseif fxKey == "warrior_combo_attack" then
 			return "3cbc64d1f8564aeaa7585dc2e4699b3b"
 		elseif fxKey == "warrior_dragon_roar" then
-			return "3caa4d96acd74517829aa166f10e8a28"
+			-- No verified Dragon Roar(1311006) clip exists in the indexed MSW resources. Do not use
+			-- dragonimperialbreathe or dragon monster clips; PlayDragonRoarFx builds a restrained roar
+			-- shockwave from native particles instead.
+			return ""
 		elseif fxKey == "warrior_power_blast" then
 			return "4987142bef4b484298eb29c6f64b2f1e"
 		elseif fxKey == "warrior_combo_rage" then
@@ -148,7 +153,7 @@ script CombatFxLogic extends Logic
 			["warrior_rage"] = 0.65,
 			["warrior_hyper_body"] = 0.85,
 			["warrior_combo_attack"] = 0.75,
-			["warrior_dragon_roar"] = 0.7,
+			["warrior_dragon_roar"] = 0.75,
 			["warrior_power_blast"] = 0.6,
 			["warrior_combo_rage"] = 0.72,
 			["archer_arrow_blow"] = 1.3,
@@ -207,6 +212,158 @@ script CombatFxLogic extends Logic
 		return BasicParticleType.CircleBurst
 	end
 
+	method table ResolveFeelProfile(string fxKey)
+		-- Camera shake / hit-stop are deliberately tiny: enough to sell weight, short enough not to
+		-- make the board game feel sluggish during multi-cast turns.
+		if fxKey == "warrior_dragon_roar" then
+			return {
+				shake = 0.09,
+				shakeDuration = 0.14,
+				hitStopScale = 0.84,
+				hitStopDuration = 0.035,
+				castParticle = BasicParticleType.CircleBurst,
+				castParticleScale = 0.85,
+			}
+		elseif fxKey == "mage_explosion" or fxKey == "archer_arrow_bomb" or fxKey == "archer_bomb_rain" or fxKey == "warrior_power_blast" then
+			return {
+				shake = 0.12,
+				shakeDuration = 0.16,
+				hitStopScale = 0.74,
+				hitStopDuration = 0.055,
+				castParticle = BasicParticleType.BigExplosion,
+				castParticleScale = 1.1,
+			}
+		elseif fxKey == "mage_thunder_bolt" or fxKey == "mage_thunder_spear" or fxKey == "mage_storm_spear" then
+			return {
+				shake = 0.08,
+				shakeDuration = 0.12,
+				hitStopScale = 0.78,
+				hitStopDuration = 0.045,
+				castParticle = BasicParticleType.LightningStrikeSharpTall,
+				castParticleScale = 1.0,
+			}
+		elseif fxKey == "warrior_combo_attack" or fxKey == "warrior_slash_blast" or fxKey == "thief_savage_blow" or fxKey == "thief_assaulter" then
+			return {
+				shake = 0.07,
+				shakeDuration = 0.1,
+				hitStopScale = 0.82,
+				hitStopDuration = 0.04,
+				castParticle = BasicParticleType.SparkRadialExplosion,
+				castParticleScale = 0.95,
+			}
+		elseif fxKey == "warrior_rage" or fxKey == "warrior_hyper_body" or fxKey == "mage_holy_symbol" or fxKey == "thief_shadow_partner" then
+			return {
+				shake = 0.0,
+				shakeDuration = 0.0,
+				hitStopScale = 1.0,
+				hitStopDuration = 0.0,
+				castParticle = BasicParticleType.Aura,
+				castParticleScale = 1.0,
+			}
+		elseif string.find(fxKey, "archer_", 1, true) == 1 or fxKey == "thief_lucky_seven" or fxKey == "thief_triple_seven" then
+			return {
+				shake = 0.035,
+				shakeDuration = 0.07,
+				hitStopScale = 0.9,
+				hitStopDuration = 0.025,
+				castParticle = BasicParticleType.PillarBurst,
+				castParticleScale = 0.75,
+			}
+		elseif string.find(fxKey, "mage_", 1, true) == 1 then
+			return {
+				shake = 0.045,
+				shakeDuration = 0.08,
+				hitStopScale = 0.88,
+				hitStopDuration = 0.03,
+				castParticle = BasicParticleType.CircleBurst,
+				castParticleScale = 0.8,
+			}
+		end
+		return {
+			shake = 0.04,
+			shakeDuration = 0.08,
+			hitStopScale = 0.9,
+			hitStopDuration = 0.025,
+			castParticle = BasicParticleType.SparkExplosion,
+			castParticleScale = 0.75,
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyHitStop(number timeScale, number duration)
+		if timeScale >= 1.0 or duration <= 0 then
+			return
+		end
+		if self.hitStopTimerId ~= 0 then
+			_TimerService:ClearTimer(self.hitStopTimerId)
+			self.hitStopTimerId = 0
+		end
+		_UtilLogic:SetClientTimeScale(timeScale)
+		self.hitStopTimerId = _TimerService:SetTimerOnce(self.RestoreClientTimeScale, duration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreClientTimeScale()
+		_UtilLogic:SetClientTimeScale(1.0)
+		self.hitStopTimerId = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaySkillFeelOnCast(string fxKey, integer col, integer row)
+		local profile = self:ResolveFeelProfile(fxKey)
+		local inst = self:ResolveFxInstigator()
+		local pos = _BoardLogic:CellToWorld(col, row)
+		if profile.castParticle ~= nil and isvalid(inst) then
+			local scaleValue = profile.castParticleScale or 0.8
+			_ParticleService:PlayBasicParticle(profile.castParticle, inst, pos, 0, Vector3(scaleValue, scaleValue, 1), false, nil)
+		end
+		if profile.shake ~= nil and profile.shake > 0 then
+			local camera = _CameraService:GetCurrentCameraComponent()
+			if isvalid(camera) then
+				camera:ShakeCamera(profile.shake, profile.shakeDuration or 0.08)
+			end
+		end
+		self:ApplyHitStop(profile.hitStopScale or 1.0, profile.hitStopDuration or 0.0)
+		log("[CombatFxLogic] feel cast: " .. fxKey .. " shake=" .. tostring(profile.shake) .. " stop=" .. tostring(profile.hitStopDuration))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaySkillImpactJuice(string fxKey, integer col, integer row)
+		local inst = self:ResolveFxInstigator()
+		if not isvalid(inst) then
+			return
+		end
+		local pos = _BoardLogic:CellToWorld(col, row)
+		local particleType = BasicParticleType.SparkExplosion
+		local scale = 0.65
+		if fxKey == "warrior_dragon_roar" then
+			particleType = BasicParticleType.DustExplosion
+			scale = 0.58
+		elseif fxKey == "mage_thunder_bolt" or fxKey == "mage_thunder_spear" or fxKey == "mage_storm_spear" then
+			particleType = BasicParticleType.LightningBlast
+			scale = 0.75
+		elseif fxKey == "mage_fire_arrow" or fxKey == "mage_explosion" then
+			particleType = BasicParticleType.SmallExplosion
+			scale = 0.9
+		elseif fxKey == "mage_ice_strike" or fxKey == "archer_ice_shot" or fxKey == "archer_double_ice_shot" then
+			particleType = BasicParticleType.CircleBurst
+			scale = 0.8
+		elseif fxKey == "mage_poison_mist" then
+			particleType = BasicParticleType.RisingSteam
+			scale = 0.85
+		elseif string.find(fxKey, "archer_", 1, true) == 1 then
+			particleType = BasicParticleType.PillarBurst
+			scale = 0.7
+		elseif string.find(fxKey, "thief_", 1, true) == 1 then
+			particleType = BasicParticleType.StarVortex
+			scale = 0.7
+		elseif string.find(fxKey, "warrior_", 1, true) == 1 then
+			particleType = BasicParticleType.DustExplosion
+			scale = 0.75
+		end
+		_ParticleService:PlayBasicParticle(particleType, inst, pos, 0, Vector3(scale, scale, 1), false, nil)
+	end
+
 	@ExecSpace("Multicast")
 	method void PlayImpactFx(string fxKey, integer col, integer row)
 		-- Skill-specific burst AT the target cell so ranged/targeted skills (magic claw, lucky
@@ -242,6 +399,7 @@ script CombatFxLogic extends Logic
 		if self.hitSoundRuid ~= "" then
 			_SoundService:PlaySoundAtPos(self.hitSoundRuid, pos, nil, 1)
 		end
+		self:PlaySkillImpactJuice(fxKey, col, row)
 	end
 
 	method table BuildBoardFxOptions(integer row, boolean flipX, boolean flipY)
@@ -327,8 +485,11 @@ script CombatFxLogic extends Logic
 		end
 		local inst = self:ResolveFxInstigator()
 		local pos = _BoardLogic:CellToWorld(col, row)
+		self:PlaySkillFeelOnCast(fxKey, col, row)
 		local effectRuid = self:ResolveImpactEffectRuid(fxKey)
-		if effectRuid == "" then
+		if fxKey == "warrior_dragon_roar" then
+			self:PlayDragonRoarFx(col, row)
+		elseif effectRuid == "" then
 			-- No real clip mapped: keep the BasicParticle fallback. Burst at the caster cell, then
 			-- trail it across the skill's pattern cells so a line skill reads as a traveling shot
 			-- (and an AOE as a covered area) instead of one dot at the caster cell.
@@ -346,13 +507,13 @@ script CombatFxLogic extends Logic
 			-- is only invoked for RANGED_TARGET.
 			local skillData = _SkillDataLogic:GetSkillData(fxKey)
 			local shape = skillData ~= nil and skillData.shape or ""
-			if shape == "ADJACENT8" or shape == "ADJACENT4" then
+			if shape == "ADJACENT8" or shape == "ADJACENT4" or shape == "RING2" then
 				-- Caster-cell-centred burst/sweep: one enlarged clip covers the surrounding cells.
 				local options = self:BuildBoardFxOptions(row, false, false)
 				local s = self:ResolveImpactEffectScale(fxKey)
 				local serial = _EffectService:PlayEffect(effectRuid, inst, pos, 0, Vector3(s, s, 1), false, options)
 				log("[CombatFxLogic] real cast effect: " .. fxKey .. " ruid=" .. effectRuid .. " serial=" .. tostring(serial) .. " (caster burst) at (" .. tostring(col) .. "," .. tostring(row) .. ")")
-			elseif shape == "LINE" or shape == "ADJACENT4_SINGLE" then
+			elseif shape == "LINE" or shape == "ADJACENT4_SINGLE" or shape == "FRONT_ARC" or shape == "CROSS2" then
 				-- Directional path / single-hit cells: render along the resolved cells.
 				local cells = _AttackPatternLogic:ResolveSkillCells(fxKey, col, row, direction)
 				self:PlayRealEffectAlongCells(fxKey, effectRuid, cells, direction)
@@ -364,6 +525,29 @@ script CombatFxLogic extends Logic
 			_SoundService:PlaySoundAtPos(self.castSoundRuid, pos, nil, 1)
 		end
 		log("[CombatFxLogic] cast fx: " .. fxKey .. " at (" .. tostring(col) .. "," .. tostring(row) .. ") dir=" .. direction)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayDragonRoarFx(integer col, integer row)
+		-- Dragon Roar is a roar shockwave, not a breath/dragon-summon clip. Keep it readable:
+		-- a compact center pulse plus sparse outer ripples instead of repeating a huge effect on
+		-- every RING2 cell.
+		local inst = self:ResolveFxInstigator()
+		local centerPos = _BoardLogic:CellToWorld(col, row)
+		_ParticleService:PlayBasicParticle(BasicParticleType.CircleBurst, inst, centerPos, 0, Vector3(1.0, 1.0, 1), false, nil)
+		_ParticleService:PlayBasicParticle(BasicParticleType.DustExplosion, inst, centerPos, 0, Vector3(0.75, 0.75, 1), false, nil)
+		local cells = _AttackPatternLogic:ResolveSkillCells("warrior_dragon_roar", col, row, "UP")
+		local pulseCount = 0
+		local step = 0
+		for _, pc in ipairs(cells) do
+			step += 1
+			if step % 4 == 0 then
+				local cellPos = _BoardLogic:CellToWorld(pc.col, pc.row)
+				_ParticleService:PlayBasicParticle(BasicParticleType.SparkRadialExplosion, inst, cellPos, 0, Vector3(0.32, 0.32, 1), false, nil)
+				pulseCount += 1
+			end
+		end
+		log("[CombatFxLogic] dragon roar fx: particle-only shockwave pulses=" .. tostring(pulseCount) .. " cells=" .. tostring(#cells))
 	end
 
 	@ExecSpace("Multicast")
@@ -396,6 +580,7 @@ script CombatFxLogic extends Logic
 		end
 		local pos = _BoardLogic:CellToWorld(col, row)
 		_ParticleService:PlayBasicParticle(BasicParticleType.SparkExplosion, self:ResolveFxInstigator(), pos, 0, Vector3(1, 1, 1), false, nil)
+		self:PlaySkillImpactJuice(fxKey, col, row)
 		if self.hitSoundRuid ~= "" then
 			_SoundService:PlaySoundAtPos(self.hitSoundRuid, pos, nil, 1)
 		end

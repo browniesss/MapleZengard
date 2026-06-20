@@ -1,0 +1,744 @@
+@Logic
+@ExecSpace("ClientOnly")
+script UIOutgameEquipmentPopupLogic extends Logic
+
+	property Entity rootGroup = "ed399780-b455-4cdc-8f76-b8c4f07c1586"
+
+	property Entity btnClose = "d5f55645-644e-4255-b491-962049448415"
+
+	property Entity slotWeapon = "c0c2e3d9-4aef-458b-90ed-f416367fbdd5"
+
+	property Entity slotHat = "6b58c038-dfad-4563-91c2-2521b4c01957"
+
+	property Entity slotOverall = "d99870f9-ba77-4f47-912d-14de5d2ce7dc"
+
+	property Entity slotGlove = "2b2bf501-55c2-4b52-b759-167e263f0d64"
+
+	property Entity slotShoes = "d629d9c2-97fe-4125-92fd-ae20c05f9f3d"
+
+	property Entity slotCape = "089a345b-581c-4af8-9a79-f4a325f17c96"
+
+	property Entity itemCard1 = "33c5cafe-1e7b-4ce3-8931-dd21d538240e"
+
+	property Entity itemCard2 = "2dc52f3e-b362-4a3e-9a7f-1101d8871783"
+
+	property Entity selectedSlotText = "233ccad6-c822-4df5-9191-d5a6c64236b9"
+
+	property Entity statSummaryText = "741d6206-b34d-4991-a1d0-4e1dd8387016"
+
+	property Entity cubeButton = "995d3ff7-968a-4ac4-8f3c-0e8abaf88405"
+
+	property Entity effectToggleButton = "5b69fb9c-4627-430b-97e5-5c69d66b694d"
+
+	property Entity cubeCountText = "ad5c625e-42b9-450d-8f57-93343188640e"
+
+	property Entity potentialTitleText = "4c4ef66f-0f17-411e-b227-62340b2adc27"
+
+	property Entity potentialLine1Text = "5cfe8375-361a-4048-b3f3-1834ed0202d9"
+
+	property Entity potentialLine2Text = "1b8bd3e1-f495-4d98-a723-064e87b86755"
+
+	property Entity potentialLine3Text = "1f2cf69e-b47e-418a-ba40-e81089024ffc"
+
+	property Entity cubeResultText = "7b2317cf-374b-4bb5-95bf-3362954c3059"
+
+	property Entity potentialPanel = "a3045eac-f693-4de8-ac10-43172ec300d5"
+
+	property Entity potentialPanelTop = "5c475332-0865-4eee-ad4c-903982878e6e"
+
+	property Entity potentialRankBadge = "f9d770e8-20bb-4bf6-aae8-a9dc7f26571f"
+
+	property Entity cubeFxGlow = "70bf107f-f8c1-4f13-8af1-b946886cb208"
+
+	property Entity cubeFxCore = "4e1028f0-4f46-4fd7-a312-55ce2a82a6be"
+
+	property Entity tierUpFxPanel = "e3ee084d-037b-4b6a-adf4-166d97d4ac2e"
+
+	property Entity tierUpFxText = "aac2d583-7223-4471-a104-dd1c9d5e8e01"
+
+	property string selectedSlot = "weapon"
+
+	property string lastStateJson = ""
+
+	property any state = nil
+
+	property any slotEntities = nil
+
+	property any itemCards = nil
+
+	property boolean isOpen = false
+
+	property boolean wired = false
+
+	property boolean wireWarned = false
+
+	property table buttonHandlers = {}
+
+	property table occludedGroups = {}
+
+	property string lastCubeResult = "큐브를 사용하면 선택한 장비의 잠재 3줄이 재설정됩니다."
+
+	property string lastCubeOldRank = ""
+
+	property string lastCubeNewRank = ""
+
+	property integer cubeFxTimerId = 0
+
+	property integer tierUpFxTimerId = 0
+
+	property string clickSfxRuid = "972843e759204d3e9ad84e7d3fa94f83"
+
+	property string hoverSfxRuid = "159bf70a74634bfc8e91a29e527a4be5"
+
+	method void OnBeginPlay()
+		-- The group starts enabled so this Logic can initialize, then hides itself.
+		self.slotEntities = {
+			weapon = self.slotWeapon,
+			hat = self.slotHat,
+			overall = self.slotOverall,
+			glove = self.slotGlove,
+			shoes = self.slotShoes,
+			cape = self.slotCape,
+		}
+		self.itemCards = { self.itemCard1, self.itemCard2 }
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		self:HideCubeFx()
+		log("[UIOutgameEquipmentPopup] OnBeginPlay")
+	end
+
+	method void OnUpdate(number delta)
+		-- Polls the client cache while open; server pushes arrive via OutgameEquipmentLogic.
+		if not self.isOpen then
+			return
+		end
+		if not self.wired then
+			if self:TryWire() then
+				self.wired = true
+				self.wireWarned = false
+			else
+				if not self.wireWarned then
+					log_warning("[UIOutgameEquipmentPopup] waiting for equipment UI bindings")
+					self.wireWarned = true
+				end
+				return
+			end
+		end
+		local json = _OutgameEquipmentLogic.ClientEquipmentJson
+		if json ~= "" and json ~= self.lastStateJson then
+			self.lastStateJson = json
+			self.state = _HttpService:JSONDecode(json)
+			self:RefreshAll()
+		end
+	end
+
+	method boolean TryWire()
+		-- Connects close, slot, item-card, and cube buttons once their UI entities exist.
+		if not isvalid(self.btnClose) or not isvalid(self.itemCard1) or not isvalid(self.itemCard2) or not isvalid(self.cubeButton) or not isvalid(self.effectToggleButton) then
+			if not self.wireWarned then
+				log_warning("[UIOutgameEquipmentPopup] missing button/card/cube binding")
+			end
+			return false
+		end
+		for _, slotKey in ipairs(_OutgameEquipmentLogic:GetSlotKeys()) do
+			if not isvalid(self.slotEntities[slotKey]) then
+				if not self.wireWarned then
+					log_warning("[UIOutgameEquipmentPopup] missing slot binding: " .. slotKey)
+				end
+				return false
+			end
+		end
+		self:WireButton(self.btnClose, function() self:Close() end)
+		self:WireButton(self.cubeButton, function() self:OnCubeClicked() end)
+		self:WireButton(self.effectToggleButton, function() self:OnEffectToggleClicked() end)
+		for _, slotKey in ipairs(_OutgameEquipmentLogic:GetSlotKeys()) do
+			local captured = slotKey
+			self:WireButton(self.slotEntities[slotKey], function()
+				self.selectedSlot = captured
+				self:RefreshAll()
+			end)
+		end
+		for index, card in ipairs(self.itemCards) do
+			local capturedIndex = index
+			self:WireButton(card, function() self:OnItemCardClicked(capturedIndex) end)
+		end
+		log("[UIOutgameEquipmentPopup] wired")
+		return true
+	end
+
+	method void WireButton(Entity btnEntity, any onClick)
+		-- Adds click and hover feedback for every interactive surface.
+		if not isvalid(btnEntity) then
+			return
+		end
+		local clickHandler = btnEntity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound(self.clickSfxRuid, 1.0)
+			if onClick ~= nil then
+				onClick()
+			end
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local hoverHandler = btnEntity:ConnectEvent(UITouchEnterEvent, function()
+			_SoundService:PlaySound(self.hoverSfxRuid, 0.6)
+		end)
+		table.insert(self.buttonHandlers, { target = btnEntity, evType = UITouchEnterEvent, evHandler = hoverHandler })
+	end
+
+	method void Open()
+		-- Opens the pre-game equipment window and requests fresh account equipment state.
+		if _UIRouterLogic:GetCurrentScreen() == "GameHud" then
+			_UIToastLogic:ShowMessage("게임 중에는 장비를 변경할 수 없습니다.")
+			return
+		end
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = true
+		end
+		self:OccludeBackground()
+		self.isOpen = true
+		self.lastStateJson = ""
+		if not self.wired then
+			self.wired = self:TryWire()
+		end
+		local cachedJson = _OutgameEquipmentLogic.ClientEquipmentJson
+		if cachedJson ~= "" then
+			self.lastStateJson = cachedJson
+			self.state = _HttpService:JSONDecode(cachedJson)
+			self:RefreshAll()
+		end
+		_OutgameEquipmentLogic:RequestSyncOutgameEquipment()
+		log("[UIOutgameEquipmentPopup] opened")
+	end
+
+	method void Close()
+		-- Closes the modal and restores the hidden background screen.
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = false
+		end
+		self:RestoreBackground()
+		self.isOpen = false
+		log("[UIOutgameEquipmentPopup] closed")
+	end
+
+	method void OnItemCardClicked(integer index)
+		-- Equips the selected slot's item candidate through the server authority.
+		local items = _OutgameEquipmentLogic:GetItemsForSlot(self.selectedSlot)
+		local item = items[index]
+		if item == nil then
+			return
+		end
+		_OutgameEquipmentLogic:RequestEquipOutgameItem(item.id)
+		log("[UIOutgameEquipmentPopup] equip requested: " .. item.id)
+	end
+
+	method void OnCubeClicked()
+		-- Requests a potential reroll for the currently equipped item in the selected slot.
+		if self.state == nil or self.state.equipped == nil then
+			return
+		end
+		local itemId = self.state.equipped[self.selectedSlot] or ""
+		if itemId == "" then
+			_UIToastLogic:ShowMessage("큐브를 사용할 장비가 없습니다.")
+			return
+		end
+		self.lastCubeResult = "큐브 사용 중..."
+		self:PlayCubeUseFx("RARE")
+		self:RefreshPotentialPanel()
+		_OutgameEquipmentLogic:RequestCubeOutgameItem(itemId)
+		log("[UIOutgameEquipmentPopup] cube requested: " .. itemId)
+	end
+
+	method void OnEffectToggleClicked()
+		-- Toggles whether pre-game equipment contributes real combat/reward stats.
+		local enabled = true
+		if self.state ~= nil and self.state.effectsEnabled == false then
+			enabled = false
+		end
+		_OutgameEquipmentLogic:RequestSetOutgameEquipmentEffectsEnabled(not enabled)
+		log("[UIOutgameEquipmentPopup] effect toggle requested: " .. tostring(not enabled))
+	end
+
+	method void SetCubeResult(string message)
+		-- Stores the latest cube result message for the equipment popup.
+		self.lastCubeResult = message
+		if self.isOpen then
+			self:RefreshPotentialPanel()
+		end
+	end
+
+	method void ApplyCubeResult(string itemId, string itemName, string oldRank, string newRank, integer cubeCount, string message)
+		-- Applies a completed cube result and plays a stronger animation when rank increased.
+		self.lastCubeResult = message
+		self.lastCubeOldRank = oldRank
+		self.lastCubeNewRank = newRank
+		if self.isOpen then
+			self:RefreshPotentialPanel()
+			self:PlayCubeCompleteFx(oldRank, newRank, itemName)
+		end
+	end
+
+	method void HideCubeFx()
+		-- Hides short-lived cube and tier-up effect layers.
+		if isvalid(self.cubeFxGlow) then
+			self.cubeFxGlow.Enable = false
+		end
+		if isvalid(self.cubeFxCore) then
+			self.cubeFxCore.Enable = false
+		end
+		self:HideTierUpFx()
+	end
+
+	method void HideTierUpFx()
+		-- Fully clears the tier-up banner so its text cannot linger after the panel fades.
+		if isvalid(self.tierUpFxPanel) then
+			self.tierUpFxPanel.Enable = false
+			if isvalid(self.tierUpFxPanel.UITransformComponent) then
+				self.tierUpFxPanel.UITransformComponent.UIScale = Vector3(1, 1, 1)
+			end
+		end
+		if isvalid(self.tierUpFxText) then
+			self.tierUpFxText.Enable = false
+			self.tierUpFxText.TextComponent.Text = ""
+		end
+	end
+
+	method void ClearCubeFxTimers()
+		-- Clears effect timers before starting another cube animation.
+		if self.cubeFxTimerId ~= 0 then
+			_TimerService:ClearTimer(self.cubeFxTimerId)
+			self.cubeFxTimerId = 0
+		end
+		if self.tierUpFxTimerId ~= 0 then
+			_TimerService:ClearTimer(self.tierUpFxTimerId)
+			self.tierUpFxTimerId = 0
+		end
+	end
+
+	method void PlayCubeUseFx(string rank)
+		-- Plays a charging flash while the server rerolls potential lines.
+		self:ClearCubeFxTimers()
+		self:HideTierUpFx()
+		if isvalid(self.cubeFxGlow) then
+			self.cubeFxGlow.Enable = true
+			self:SetEntityColor(self.cubeFxGlow, self:RankColor(rank, 0.26))
+			self.cubeFxGlow.UITransformComponent.UIScale = Vector3(0.85, 0.85, 1)
+		end
+		if isvalid(self.cubeFxCore) then
+			self.cubeFxCore.Enable = true
+			self:SetEntityColor(self.cubeFxCore, Color(1, 1, 1, 0.72))
+			self.cubeFxCore.UITransformComponent.UIScale = Vector3(0.55, 0.55, 1)
+		end
+		local startTime = _UtilLogic.ElapsedSeconds
+		self.cubeFxTimerId = _TimerService:SetTimerRepeat(function()
+			local t = _UtilLogic.ElapsedSeconds - startTime
+			local pulse = 0.5 + math.sin(t * 22) * 0.5
+			if isvalid(self.cubeFxGlow) then
+				self:SetEntityColor(self.cubeFxGlow, self:RankColor(rank, 0.14 + pulse * 0.20))
+				local s = 0.86 + pulse * 0.16
+				self.cubeFxGlow.UITransformComponent.UIScale = Vector3(s, s, 1)
+			end
+			if isvalid(self.cubeFxCore) then
+				self:SetEntityColor(self.cubeFxCore, Color(1, 1, 1, 0.40 + pulse * 0.36))
+				local s2 = 0.58 + pulse * 0.18
+				self.cubeFxCore.UITransformComponent.UIScale = Vector3(s2, s2, 1)
+			end
+			if t >= 0.62 then
+				if self.cubeFxTimerId ~= 0 then
+					_TimerService:ClearTimer(self.cubeFxTimerId)
+					self.cubeFxTimerId = 0
+				end
+				if isvalid(self.cubeFxCore) then
+					self.cubeFxCore.Enable = false
+				end
+			end
+		end, 1/60)
+	end
+
+	method void PlayCubeCompleteFx(string oldRank, string newRank, string itemName)
+		-- Finishes the cube flash; tier-ups get a larger banner and longer glow.
+		local tierUp = self:RankWeight(newRank) > self:RankWeight(oldRank)
+		self:PlayCubeUseFx(newRank)
+		if not tierUp then
+			return
+		end
+		if isvalid(self.tierUpFxPanel) then
+			self.tierUpFxPanel.Enable = true
+			_UILogic:SetSiblingIndex(self.tierUpFxPanel.UITransformComponent, 1000000)
+			self:SetEntityColor(self.tierUpFxPanel, self:RankColor(newRank, 0.92))
+			self.tierUpFxPanel.UITransformComponent.UIScale = Vector3(0.72, 0.72, 1)
+		end
+		if isvalid(self.tierUpFxText) then
+			self.tierUpFxText.Enable = true
+			self.tierUpFxText.TextComponent.Text = _OutgameEquipmentLogic:GetRankLabel(newRank) .. " 승급!"
+			self.tierUpFxText.TextComponent.FontColor = Color(1, 1, 1, 1)
+		end
+		local startTime = _UtilLogic.ElapsedSeconds
+		self.tierUpFxTimerId = _TimerService:SetTimerRepeat(function()
+			local t = _UtilLogic.ElapsedSeconds - startTime
+			local pulse = 0.5 + math.sin(t * 16) * 0.5
+			if isvalid(self.tierUpFxPanel) then
+				local scale = 0.74 + math.min(t * 1.55, 0.32) + pulse * 0.045
+				self.tierUpFxPanel.UITransformComponent.UIScale = Vector3(scale, scale, 1)
+				self:SetEntityColor(self.tierUpFxPanel, self:RankColor(newRank, math.max(0, 0.92 - t * 0.28)))
+			end
+			if t >= 3.10 then
+				if self.tierUpFxTimerId ~= 0 then
+					_TimerService:ClearTimer(self.tierUpFxTimerId)
+					self.tierUpFxTimerId = 0
+				end
+				self:HideTierUpFx()
+			end
+		end, 1/60)
+		log("[UIOutgameEquipmentPopup] tier up fx: " .. oldRank .. " -> " .. newRank)
+	end
+
+	method void SetEntityColor(Entity target, Color color)
+		-- Applies a tint to sprite-backed UI entities.
+		if isvalid(target) and isvalid(target.SpriteGUIRendererComponent) then
+			target.SpriteGUIRendererComponent.Color = color
+		end
+	end
+
+	method Color RankColor(string rank, number alpha)
+		-- Maple potential colors: Rare blue, Epic purple, Unique gold, Legendary green.
+		if rank == "LEGENDARY" then
+			return Color(0.22, 0.86, 0.36, alpha)
+		elseif rank == "UNIQUE" then
+			return Color(1.00, 0.82, 0.18, alpha)
+		elseif rank == "EPIC" then
+			return Color(0.72, 0.40, 1.00, alpha)
+		end
+		return Color(0.25, 0.55, 1.00, alpha)
+	end
+
+	method Color RankSoftColor(string rank, number alpha)
+		-- Softer background tint derived from the potential rank.
+		if rank == "LEGENDARY" then
+			return Color(0.78, 1.00, 0.82, alpha)
+		elseif rank == "UNIQUE" then
+			return Color(1.00, 0.93, 0.58, alpha)
+		elseif rank == "EPIC" then
+			return Color(0.88, 0.76, 1.00, alpha)
+		end
+		return Color(0.74, 0.88, 1.00, alpha)
+	end
+
+	method integer RankWeight(string rank)
+		-- Converts rank keys into sortable tier weights.
+		if rank == "LEGENDARY" then
+			return 4
+		elseif rank == "UNIQUE" then
+			return 3
+		elseif rank == "EPIC" then
+			return 2
+		end
+		return 1
+	end
+
+	method void RefreshAll()
+		-- Renders slots, selected-slot cards, potential lines, and aggregate effect summary.
+		if self.state == nil then
+			return
+		end
+		for _, slotKey in ipairs(_OutgameEquipmentLogic:GetSlotKeys()) do
+			self:RefreshSlot(slotKey)
+		end
+		self:RefreshItemCards()
+		self:RefreshPotentialPanel()
+		self:RefreshSummary()
+		self:RefreshEffectToggle()
+		log("[UIOutgameEquipmentPopup] refreshed")
+	end
+
+	method void RefreshSlot(string slotKey)
+		-- Updates one equipped slot tile.
+		local slotEntity = self.slotEntities[slotKey]
+		if not isvalid(slotEntity) then
+			return
+		end
+		local slotDef = _OutgameEquipmentLogic:GetSlotDef(slotKey)
+		local itemId = self.state.equipped[slotKey] or ""
+		local item = _OutgameEquipmentLogic:GetItem(itemId)
+		local rank = self.state.potentialRanks ~= nil and self.state.potentialRanks[itemId] or "RARE"
+		local selected = (slotKey == self.selectedSlot)
+		local label = slotEntity:GetChildByName("SlotLabel", false)
+		if isvalid(label) then
+			label.TextComponent.Text = slotDef.label
+			label.TextComponent.FontColor = self:RankColor(rank, 1)
+		end
+		local name = slotEntity:GetChildByName("ItemName", false)
+		if isvalid(name) then
+			name.TextComponent.Text = item ~= nil and item.name or "-"
+			name.TextComponent.FontColor = item ~= nil and self:RankColor(rank, 1) or Color(0.31, 0.43, 0.56, 1)
+		end
+		local icon = slotEntity:GetChildByName("Icon", false)
+		if isvalid(icon) and item ~= nil then
+			icon.SpriteGUIRendererComponent.ImageRUID = DataRef(item.iconRuid)
+		end
+		local iconFrame = slotEntity:GetChildByName("IconFrame", false)
+		if isvalid(iconFrame) then
+			self:SetEntityColor(iconFrame, self:RankColor(rank, selected and 0.92 or 0.72))
+		end
+		if isvalid(slotEntity.SpriteGUIRendererComponent) then
+			if selected then
+				slotEntity.SpriteGUIRendererComponent.Color = self:RankSoftColor(rank, 1)
+			elseif item ~= nil then
+				slotEntity.SpriteGUIRendererComponent.Color = self:RankSoftColor(rank, 0.84)
+			else
+				slotEntity.SpriteGUIRendererComponent.Color = Color(0.78, 0.88, 0.96, 1)
+			end
+		end
+	end
+
+	method void RefreshItemCards()
+		-- Shows the two item candidates for the currently selected slot.
+		local slotDef = _OutgameEquipmentLogic:GetSlotDef(self.selectedSlot)
+		if isvalid(self.selectedSlotText) then
+			self.selectedSlotText.TextComponent.Text = slotDef.label .. " 후보"
+		end
+		local items = _OutgameEquipmentLogic:GetItemsForSlot(self.selectedSlot)
+		for index, card in ipairs(self.itemCards) do
+			local item = items[index]
+			if isvalid(card) then
+				card.Enable = item ~= nil
+				if item ~= nil then
+					self:RenderItemCard(card, item)
+				end
+			end
+		end
+	end
+
+	method void RenderItemCard(Entity card, table item)
+		-- Writes one candidate card's icon, name, description, and equipped state.
+		local equipped = self.state ~= nil and self.state.equipped ~= nil and self.state.equipped[item.slot] == item.id
+		local nameText = card:GetChildByName("NameText", false)
+		if isvalid(nameText) then
+			nameText.TextComponent.Text = item.name
+		end
+		local descText = card:GetChildByName("DescText", false)
+		if isvalid(descText) then
+			descText.TextComponent.Text = item.desc
+		end
+		local gradeText = card:GetChildByName("GradeText", false)
+		local rank = self.state ~= nil and self.state.potentialRanks ~= nil and self.state.potentialRanks[item.id] or "RARE"
+		if isvalid(gradeText) then
+			gradeText.TextComponent.Text = _OutgameEquipmentLogic:GetRankLabel(rank)
+			gradeText.TextComponent.FontColor = self:RankColor(rank, 1)
+		end
+		local equipText = card:GetChildByName("EquipText", false)
+		if isvalid(equipText) then
+			equipText.TextComponent.Text = equipped and "장착중" or "장착"
+		end
+		local icon = card:GetChildByName("Icon", false)
+		if isvalid(icon) then
+			icon.SpriteGUIRendererComponent.ImageRUID = DataRef(item.iconRuid)
+		end
+		local iconFrame = card:GetChildByName("IconFrame", false)
+		if isvalid(iconFrame) then
+			self:SetEntityColor(iconFrame, self:RankColor(rank, 0.80))
+		end
+		if isvalid(card.SpriteGUIRendererComponent) then
+			if equipped then
+				card.SpriteGUIRendererComponent.Color = self:RankSoftColor(rank, 1)
+			else
+				card.SpriteGUIRendererComponent.Color = self:RankSoftColor(rank, 0.78)
+			end
+		end
+	end
+
+	method void RefreshPotentialPanel()
+		-- Renders cube count and potential lines for the equipped item in the selected slot.
+		if self.state == nil then
+			return
+		end
+		local cubeCount = self.state.cubeCount or 0
+		if isvalid(self.cubeCountText) then
+			self.cubeCountText.TextComponent.Text = "보유 큐브 " .. tostring(cubeCount) .. "개"
+		end
+		local itemId = self.state.equipped[self.selectedSlot] or ""
+		local item = _OutgameEquipmentLogic:GetItem(itemId)
+		local rank = self.state.potentialRanks ~= nil and self.state.potentialRanks[itemId] or "RARE"
+		local lines = self.state.potentials ~= nil and self.state.potentials[itemId] or nil
+		if isvalid(self.potentialPanel) then
+			self:SetEntityColor(self.potentialPanel, self:RankSoftColor(rank, 0.92))
+		end
+		if isvalid(self.potentialPanelTop) then
+			self:SetEntityColor(self.potentialPanelTop, self:RankColor(rank, 0.78))
+		end
+		if isvalid(self.potentialRankBadge) then
+			self:SetEntityColor(self.potentialRankBadge, self:RankColor(rank, 0.96))
+			local badgeLabel = self.potentialRankBadge:GetChildByName("Label", false)
+			if isvalid(badgeLabel) then
+				badgeLabel.TextComponent.Text = _OutgameEquipmentLogic:GetRankLabel(rank)
+			end
+		end
+		if isvalid(self.potentialTitleText) then
+			-- The selected item name is already visible in the slot/card; keep this header one-line.
+			self.potentialTitleText.TextComponent.Text = "잠재 옵션 · " .. _OutgameEquipmentLogic:GetRankLabel(rank)
+			self.potentialTitleText.TextComponent.FontColor = self:RankColor(rank, 1)
+		end
+		self:SetPotentialLineText(self.potentialLine1Text, lines, 1)
+		self:SetPotentialLineText(self.potentialLine2Text, lines, 2)
+		self:SetPotentialLineText(self.potentialLine3Text, lines, 3)
+		if isvalid(self.cubeResultText) then
+			self.cubeResultText.TextComponent.Text = self.lastCubeResult
+		end
+	end
+
+	method void SetPotentialLineText(Entity target, table lines, integer index)
+		-- Updates one potential line text node.
+		if not isvalid(target) then
+			return
+		end
+		if lines ~= nil and lines[index] ~= nil then
+			target.TextComponent.Text = tostring(index) .. ". " .. lines[index].label
+			target.TextComponent.FontColor = self:RankColor(lines[index].rank or "RARE", 1)
+		else
+			target.TextComponent.Text = tostring(index) .. ". -"
+			target.TextComponent.FontColor = Color(0.32, 0.43, 0.55, 1)
+		end
+	end
+
+	method void RefreshSummary()
+		-- Builds a compact total effect summary from equipped account items and potentials.
+		if not isvalid(self.statSummaryText) then
+			return
+		end
+		if self.state ~= nil and self.state.effectsEnabled == false then
+			self.statSummaryText.TextComponent.Text = "장비 효과 OFF - 장착/큐브는 유지되고 전투 수치만 제외됩니다."
+			self.statSummaryText.TextComponent.FontColor = Color(0.95, 0.60, 0.25, 1)
+			return
+		end
+		self.statSummaryText.TextComponent.FontColor = Color(0.18, 0.28, 0.40, 1)
+		local totals = _OutgameEquipmentLogic:NewMultiplierTable()
+		for _, slotKey in ipairs(_OutgameEquipmentLogic:GetSlotKeys()) do
+			local itemId = self.state.equipped[slotKey] or ""
+			local item = _OutgameEquipmentLogic:GetItem(itemId)
+			if item ~= nil then
+				_OutgameEquipmentLogic:AddStats(totals, item.stats)
+				if self.state.potentials ~= nil then
+					_OutgameEquipmentLogic:AddPotentialStats(totals, self.state.potentials[itemId])
+				end
+			end
+		end
+		local lines = {}
+		self:AddSummaryLine(lines, "피해 ", (totals.atkMul or 0) + (totals.skillDmgMul or 0), false)
+		self:AddSummaryLine(lines, "속도 ", totals.atkSpeedMul or 0, false)
+		self:AddSummaryLine(lines, "치명 ", totals.critChanceAdd or 0, true)
+		self:AddSummaryLine(lines, "경험치 ", totals.expGainMul or 0, false)
+		self:AddSummaryLine(lines, "드롭 ", totals.lootDropAdd or 0, true)
+		if (totals.rangeAdd or 0) ~= 0 then
+			table.insert(lines, "사거리 +" .. tostring(totals.rangeAdd))
+		end
+		if (totals.targetAdd or 0) ~= 0 then
+			table.insert(lines, "타겟 +" .. tostring(totals.targetAdd))
+		end
+		if (totals.extraActionChance or 0) ~= 0 then
+			table.insert(lines, "추가행동 " .. self:FormatPercent(totals.extraActionChance, true))
+		end
+		if #lines == 0 then
+			self.statSummaryText.TextComponent.Text = "장착 효과 없음"
+		else
+			self.statSummaryText.TextComponent.Text = table.concat(lines, " ")
+		end
+	end
+
+	method void RefreshEffectToggle()
+		-- Updates the equipment-effect toggle chip state.
+		if not isvalid(self.effectToggleButton) then
+			return
+		end
+		local enabled = true
+		if self.state ~= nil and self.state.effectsEnabled == false then
+			enabled = false
+		end
+		if isvalid(self.effectToggleButton.TextComponent) then
+			if enabled then
+				self.effectToggleButton.TextComponent.Text = "효과 ON"
+				self.effectToggleButton.TextComponent.FontColor = Color(0.06, 0.18, 0.11, 1)
+			else
+				self.effectToggleButton.TextComponent.Text = "효과 OFF"
+				self.effectToggleButton.TextComponent.FontColor = Color(1.00, 0.93, 0.82, 1)
+			end
+		end
+		if isvalid(self.effectToggleButton.SpriteGUIRendererComponent) then
+			if enabled then
+				self.effectToggleButton.SpriteGUIRendererComponent.Color = Color(0.47, 0.86, 0.52, 1)
+			else
+				self.effectToggleButton.SpriteGUIRendererComponent.Color = Color(0.60, 0.17, 0.14, 1)
+			end
+		end
+	end
+
+	method void AddSummaryLine(table lines, string label, number value, boolean point)
+		-- Appends a stat line when the value is non-zero.
+		if value == nil or value == 0 then
+			return
+		end
+		table.insert(lines, label .. self:FormatPercent(value, point))
+	end
+
+	method string FormatPercent(number value, boolean point)
+		-- Formats additive multiplier values for Korean UI text.
+		if point then
+			return string.format("+%.0fp", value * 100)
+		end
+		return string.format("+%.0f%%", value * 100)
+	end
+
+	method any FindGroupRoot(Entity child)
+		-- Finds the root UIGroup for background occlusion.
+		local e = child
+		local hops = 0
+		while isvalid(e) and hops < 12 do
+			if isvalid(e.UIGroupComponent) then
+				return e
+			end
+			e = e.Parent
+			hops = hops + 1
+		end
+		return nil
+	end
+
+	method void OccludeBackground()
+		-- Hides lobby/stage-select while this modal is open, matching MetaGrowthPopup behavior.
+		if #self.occludedGroups > 0 then
+			return
+		end
+		self.occludedGroups = {}
+		local anchors = { _UILobbyLogic.btnStory, _UIStageSelectLogic.btnBack }
+		for _, anchor in ipairs(anchors) do
+			if isvalid(anchor) then
+				local grp = self:FindGroupRoot(anchor)
+				if isvalid(grp) and grp.Enable then
+					grp.Enable = false
+					table.insert(self.occludedGroups, grp)
+				end
+			end
+		end
+	end
+
+	method void RestoreBackground()
+		-- Re-enables only the groups hidden by this modal.
+		for _, grp in ipairs(self.occludedGroups) do
+			if isvalid(grp) then
+				grp.Enable = true
+			end
+		end
+		self.occludedGroups = {}
+	end
+
+	method void OnEndPlay()
+		-- Releases button handlers and restores any hidden group.
+		self:ClearCubeFxTimers()
+		self:HideCubeFx()
+		for _, rec in ipairs(self.buttonHandlers) do
+			if isvalid(rec.target) then
+				rec.target:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.buttonHandlers = {}
+		self:RestoreBackground()
+	end
+
+end

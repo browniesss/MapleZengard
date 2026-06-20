@@ -128,7 +128,7 @@ script SkillRangePreviewLogic extends Logic
 		end
 		local direction = self:ResolveDirection()
 		local used = 0
-		if data.shape == "RANGED_TARGET" then
+		if data.shape == "RANGED_TARGET" or data.shape == "RANGED_CHAIN" or data.shape == "RANGED_SPLASH" then
 			used = self:PaintRangedTarget(casterCell, data)
 		else
 			used = self:PaintShapeCells(skillId, casterCell, direction)
