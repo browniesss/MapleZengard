@@ -136,6 +136,20 @@ script CombatLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method void ResetAimingForZen()
+		-- Zen placement is now resolved before attack confirmation. Clear stale pre-zen direction/target
+		-- so the confirmed attack always reflects the visible post-zen board state.
+		for ownerId, cfg in pairs(self.combatConfigs) do
+			local unit = self.combatUnits[ownerId]
+			if unit == nil or not unit.isCompanion then
+				cfg.direction = _CombatConfig.DEFAULT_DIRECTION
+				cfg.targetMonsterId = ""
+			end
+		end
+		log("[CombatLogic] aiming reset for zen confirm")
+	end
+
+	@ExecSpace("ServerOnly")
 	method void ExecuteZenCombat(integer zenIndex)
 		-- Timer-chain sequence instead of long wait(): the server Logic must not block (§10-4).
 		if self.processingSequence then
@@ -446,17 +460,20 @@ script CombatLogic extends Logic
 					return targets
 				end
 				local splashRadius = skillData.splashRadius or 1
-				local primaryCol = primary["col"]
-				local primaryRow = primary["row"]
+				if primary.col == nil or primary.row == nil then
+					return targets
+				end
+				local primaryCol = primary.col
+				local primaryRow = primary.row
 				local splash = {}
 				for _, m in ipairs(alive) do
-					if _AttackPatternLogic:IsInRange(primaryCol, primaryRow, m["col"], m["row"], splashRadius) then
+					if m.col ~= nil and m.row ~= nil and _AttackPatternLogic:IsInRange(primaryCol, primaryRow, m.col, m.row, splashRadius) then
 						table.insert(splash, m)
 					end
 				end
 				table.sort(splash, function(a, b)
-					local da = math.max(math.abs(a["col"] - primaryCol), math.abs(a["row"] - primaryRow))
-					local db = math.max(math.abs(b["col"] - primaryCol), math.abs(b["row"] - primaryRow))
+					local da = math.max(math.abs(a.col - primaryCol), math.abs(a.row - primaryRow))
+					local db = math.max(math.abs(b.col - primaryCol), math.abs(b.row - primaryRow))
 					if da == db then
 						return a.monsterId < b.monsterId
 					end

@@ -23,6 +23,10 @@ script UIGameHudLogic extends Logic
 
 	property ButtonComponent zenButton = "4343fa71-1d73-44ae-a3f4-3531b8ce65ef"
 
+	property TextComponent zenLabel = "613b994e-7971-48e1-a09c-88c7a8c90610"
+
+	property ButtonComponent confirmButton = "76805a0e-a633-4894-a34c-244d162fdd74"
+
 	property ButtonComponent rerollButton = "91ead065-6c1e-42fc-83ad-17cbb1a5ee44"
 
 	property SpriteGUIRendererComponent zenCooldownFill = "3ba8ac38-f00c-43ba-b696-77b6e32d9cd1"
@@ -59,6 +63,8 @@ script UIGameHudLogic extends Logic
 
 	property boolean stageActive = false
 
+	property boolean awaitingAttackConfirm = false
+
 	property number cooldownLeft = 0
 
 	property number timeAttackElapsed = 0
@@ -72,6 +78,10 @@ script UIGameHudLogic extends Logic
 	property integer lastMonsterCount = -1
 
 	property integer bannerTimerId = 0
+
+	property integer autoConfirmTimerId = 0
+
+	property number autoConfirmElapsed = 0
 
 	property table busHandlers = {}
 
@@ -103,7 +113,7 @@ script UIGameHudLogic extends Logic
 
 	method boolean TryWire()
 		-- One-shot entity wiring, retried each frame until every bound button is valid.
-		if not isvalid(self.zenButton) or not isvalid(self.exitButton) then
+		if not isvalid(self.zenButton) or not isvalid(self.confirmButton) or not isvalid(self.exitButton) then
 			return false
 		end
 		if not isvalid(self.exitYesButton) or not isvalid(self.exitNoButton) then
@@ -122,11 +132,13 @@ script UIGameHudLogic extends Logic
 			self.zenCooldownFill.FillAmount = 0
 		end
 		self:WireButton(self.zenButton, self.OnZenClicked)
+		self:WireButton(self.confirmButton, self.OnConfirmClicked)
 		self:WireButton(self.rerollButton, self.OnRerollClicked)
 		self:WireButton(self.exitButton, self.OnExitClicked)
 		self:WireButton(self.exitYesButton, self.OnExitConfirmed)
 		self:WireButton(self.exitNoButton, self.OnExitCancelled)
 		self:ApplyPending()
+		self:RefreshZenButtonState()
 		log("[UIGameHudLogic] wired")
 		return true
 	end
@@ -166,6 +178,7 @@ script UIGameHudLogic extends Logic
 			_TimerService:ClearTimer(self.bannerTimerId)
 			self.bannerTimerId = 0
 		end
+		self:ClearAutoConfirmTimer()
 	end
 
 	method void OnUpdate(number delta)
@@ -186,10 +199,14 @@ script UIGameHudLogic extends Logic
 		-- overlay is the per-zen cooldown sweep. (The old boss-phase full-dim was removed with the
 		-- WaveLogic IsZenAvailable freeze.)
 		local overlay = 0
-		if self.cooldownLeft > 0 then
+		self.awaitingAttackConfirm = self.stageActive and _WaveLogic.IsAttackConfirmPending
+		if self.awaitingAttackConfirm then
+			overlay = 0
+		elseif self.cooldownLeft > 0 then
 			overlay = self.cooldownLeft / _BoardConfig.ZEN_COOLDOWN_SECONDS
 		end
 		self.zenCooldownFill.FillAmount = overlay
+		self:RefreshZenButtonState()
 		if self.stageActive then
 			local monsterCount = _WaveLogic.MonsterCount
 			if monsterCount ~= self.lastMonsterCount then
@@ -245,6 +262,45 @@ script UIGameHudLogic extends Logic
 		self.cooldownLeft = _BoardConfig.ZEN_COOLDOWN_SECONDS
 		log("[UIGameHudLogic] zen requested")
 		_WaveLogic:RequestZen()
+		if _UICombatControlLogic.combatMode == "AUTO" then
+			self:ScheduleAutoConfirm()
+		end
+	end
+
+	method void OnConfirmClicked()
+		if not self.stageActive then
+			return
+		end
+		if not _WaveLogic.IsAttackConfirmPending then
+			return
+		end
+		log("[UIGameHudLogic] attack confirm requested")
+		_WaveLogic:RequestConfirmAttack()
+	end
+
+	method void ScheduleAutoConfirm()
+		self:ClearAutoConfirmTimer()
+		self.autoConfirmElapsed = 0
+		self.autoConfirmTimerId = _TimerService:SetTimerRepeat(function()
+			self.autoConfirmElapsed += 0.05
+			if _WaveLogic.IsAttackConfirmPending then
+				log("[UIGameHudLogic] auto attack confirm requested")
+				_WaveLogic:RequestConfirmAttack()
+				self:ClearAutoConfirmTimer()
+				return
+			end
+			if self.autoConfirmElapsed >= 1.0 then
+				self:ClearAutoConfirmTimer()
+			end
+		end, 0.05)
+	end
+
+	method void ClearAutoConfirmTimer()
+		if self.autoConfirmTimerId ~= 0 then
+			_TimerService:ClearTimer(self.autoConfirmTimerId)
+			self.autoConfirmTimerId = 0
+		end
+		self.autoConfirmElapsed = 0
 	end
 
 	method void OnRerollClicked()
@@ -283,6 +339,7 @@ script UIGameHudLogic extends Logic
 		end
 		self.currentMode = event.mode
 		self.stageActive = true
+		self.awaitingAttackConfirm = false
 		self.cooldownLeft = 0
 		self.blinkActive = false
 		self.blinkElapsed = 0
@@ -317,12 +374,65 @@ script UIGameHudLogic extends Logic
 	method void OnStageEnded(StageEndedEvent event)
 		-- Freeze HUD state; ResultGroup handling belongs to UIResultLogic.
 		self.stageActive = false
+		self.awaitingAttackConfirm = false
+		self:ClearAutoConfirmTimer()
 		self.timeAttackRunning = false
 		self.blinkActive = false
 		if isvalid(self.exitConfirmPanel) then
 			self.exitConfirmPanel.Enable = false
 		end
 		log("[UIGameHudLogic] stage ended: " .. event.result)
+	end
+
+	method void RefreshZenButtonState()
+		if not isvalid(self.zenButton) or not isvalid(self.zenButton.Entity) then
+			return
+		end
+		local label = "\236\160\160"
+		local hint = "WAVE"
+		local topLabel = "\236\134\140\237\153\152"
+		self:SetButtonLabel(self.zenButton.Entity, label)
+		self:SetChildText(self.zenButton.Entity, "ZenButtonHint", hint)
+		if isvalid(self.confirmButton) and isvalid(self.confirmButton.Entity) then
+			self.confirmButton.Entity.Enable = self.awaitingAttackConfirm
+		end
+		if isvalid(self.zenLabel) then
+			self.zenLabel.Text = topLabel
+		end
+	end
+
+	method void SetButtonLabel(Entity root, string label)
+		if not isvalid(root) then
+			return
+		end
+		if isvalid(root.TextComponent) then
+			root.TextComponent.Text = label
+			return
+		end
+		local labelEntity = root:GetChildByName("Label", false)
+		if isvalid(labelEntity) and isvalid(labelEntity.TextComponent) then
+			labelEntity.TextComponent.Text = label
+			return
+		end
+		local textEntity = root:GetChildByName("Text", false)
+		if isvalid(textEntity) and isvalid(textEntity.TextComponent) then
+			textEntity.TextComponent.Text = label
+			return
+		end
+		local zenTextEntity = root:GetChildByName("ZenButtonText", false)
+		if isvalid(zenTextEntity) and isvalid(zenTextEntity.TextComponent) then
+			zenTextEntity.TextComponent.Text = label
+		end
+	end
+
+	method void SetChildText(Entity root, string childName, string text)
+		if not isvalid(root) then
+			return
+		end
+		local child = root:GetChildByName(childName, false)
+		if isvalid(child) and isvalid(child.TextComponent) then
+			child.TextComponent.Text = text
+		end
 	end
 
 	method void OnZenStarted(ZenStartedEvent event)

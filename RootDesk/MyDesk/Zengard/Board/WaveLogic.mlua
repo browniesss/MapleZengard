@@ -10,9 +10,14 @@ script WaveLogic extends Logic
 	@Sync
 	property boolean IsZenAvailable = true
 
+	@Sync
+	property boolean IsAttackConfirmPending = false
+
 	property number cooldownLeft = 0
 
 	property boolean processingZen = false
+
+	property integer pendingAttackZenIndex = 0
 
 	property boolean forcedBoss = false
 
@@ -66,6 +71,9 @@ script WaveLogic extends Logic
 		if not self.IsZenAvailable then
 			return
 		end
+		if self.IsAttackConfirmPending then
+			return
+		end
 		if self.processingZen then
 			return
 		end
@@ -79,6 +87,24 @@ script WaveLogic extends Logic
 			return
 		end
 		self:StartZen()
+	end
+
+	@ExecSpace("Server")
+	method void RequestConfirmAttack()
+		-- Second step of the zen flow: after placement is visible, the player confirms the attack.
+		if not _ZengardGameLogic:IsInStage() then
+			return
+		end
+		if not self.IsAttackConfirmPending then
+			return
+		end
+		if self.processingZen then
+			return
+		end
+		if _CombatLogic:IsProcessingSequence() then
+			return
+		end
+		self:ConfirmPendingAttack()
 	end
 
 	@ExecSpace("ServerOnly")
@@ -96,7 +122,9 @@ script WaveLogic extends Logic
 		self.CurrentZen = 0
 		self.MonsterCount = 0
 		self.IsZenAvailable = true
+		self.IsAttackConfirmPending = false
 		self.processingZen = false
+		self.pendingAttackZenIndex = 0
 		self.forcedBoss = false
 		self.overflowCheckPending = false
 		self.cooldownLeft = 0
@@ -144,6 +172,7 @@ script WaveLogic extends Logic
 		self:RepositionPlayer()
 		_CompanionLogic:RepositionAll()
 		self.MonsterCount = _MonsterLogic:GetAliveMonsterCount()
+		_CombatLogic:ResetAimingForZen()
 		local ev = ZenStartedEvent()
 		ev.zenIndex = self.CurrentZen
 		ev.isBossZen = isBossZen
@@ -153,7 +182,25 @@ script WaveLogic extends Logic
 			self.overflowCheckPending = true
 			log("[WaveLogic] monster overflow armed after zen: count=" .. self.MonsterCount)
 		end
-		_CombatLogic:ExecuteZenCombat(self.CurrentZen)
+		self.pendingAttackZenIndex = self.CurrentZen
+		self.IsAttackConfirmPending = true
+		self.processingZen = false
+		log("[WaveLogic] zen awaiting attack confirm: " .. tostring(self.pendingAttackZenIndex))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ConfirmPendingAttack()
+		local zenIndex = self.pendingAttackZenIndex
+		if zenIndex <= 0 then
+			log_warning("[WaveLogic] confirm attack ignored: no pending zen")
+			self.IsAttackConfirmPending = false
+			return
+		end
+		self.processingZen = true
+		self.IsAttackConfirmPending = false
+		self.pendingAttackZenIndex = 0
+		log("[WaveLogic] attack confirmed: zen=" .. tostring(zenIndex))
+		_CombatLogic:ExecuteZenCombat(zenIndex)
 		self.processingZen = false
 	end
 

@@ -54,6 +54,8 @@ script UICombatControlLogic extends Logic
 
 	property boolean inputLocked = false
 
+	property boolean lastAttackConfirmPending = false
+
 	property table castOrderIds = {}
 
 	property table pendingOrderIds = {}
@@ -100,6 +102,7 @@ script UICombatControlLogic extends Logic
 		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
 		self:SubscribeBus(StageStartedEvent, self.OnStageStarted)
 		self:SubscribeBus(StageEndedEvent, self.OnStageEnded)
+		self:SubscribeBus(ZenStartedEvent, self.OnZenStarted)
 		self:SubscribeBus(JobSelectedEvent, self.OnJobSelected)
 		self:SubscribeBus(AttackSequenceStartedEvent, self.OnAttackSequenceStarted)
 		self:SubscribeBus(AttackSequenceEndedEvent, self.OnAttackSequenceEnded)
@@ -277,6 +280,7 @@ script UICombatControlLogic extends Logic
 		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
 		self.targetMonsterId = ""
 		self.targetPickMode = false
+		self.lastAttackConfirmPending = false
 		self.castOrderIds = {}
 		self.pendingOrderIds = {}
 		self.lastOrderSignature = ""
@@ -296,11 +300,27 @@ script UICombatControlLogic extends Logic
 		-- Hide with the run; UIResultLogic owns the end-of-stage screen.
 		self.inStage = false
 		self.targetPickMode = false
+		self.lastAttackConfirmPending = false
 		if isvalid(self.groupRoot) then
 			self.groupRoot.Enable = false
 		end
 		self:SetIndicatorVisible(false)
 		log("[UICombatControlLogic] combat control hidden: result=" .. event.result)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnZenStarted(ZenStartedEvent event)
+		-- A zen now locks in the random board placement first. Clear stale pre-zen aiming so the player
+		-- makes the tactical direction/target decision against the visible board state, then confirms.
+		if not self.inStage then
+			return
+		end
+		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
+		self.targetMonsterId = ""
+		self.targetPickMode = false
+		self:SendCombatConfig()
+		self:RefreshAll()
+		log("[UICombatControlLogic] aim reset for zen confirm: " .. tostring(event.zenIndex))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -363,6 +383,10 @@ script UICombatControlLogic extends Logic
 		if not self.inStage or self.inputLocked then
 			return
 		end
+		if not _WaveLogic.IsAttackConfirmPending then
+			_UIToastLogic:ShowMessage("Press ZEN first, then choose a direction")
+			return
+		end
 		if self.combatMode ~= "MANUAL" then
 			_UIToastLogic:ShowMessage("?먮룞 紐⑤뱶?먯꽌??怨듦꺽 諛⑺뼢??吏?뺥븷 ???놁뒿?덈떎")
 			return
@@ -401,6 +425,10 @@ script UICombatControlLogic extends Logic
 	method void OnTargetClicked()
 		-- Enters/cancels world-tap target picking; the button itself is hidden for non-thief jobs.
 		if not self.inStage or self.inputLocked then
+			return
+		end
+		if not _WaveLogic.IsAttackConfirmPending then
+			_UIToastLogic:ShowMessage("Press ZEN first, then choose a target")
 			return
 		end
 		if self.localJobId ~= "thief" then
@@ -616,6 +644,15 @@ script UICombatControlLogic extends Logic
 			self:SetIndicatorVisible(false)
 			return
 		end
+		local pendingConfirm = _WaveLogic.IsAttackConfirmPending
+		if pendingConfirm ~= self.lastAttackConfirmPending then
+			self.lastAttackConfirmPending = pendingConfirm
+			if not pendingConfirm then
+				self.targetPickMode = false
+			end
+			self:RefreshDirections()
+			self:RefreshTargetUi()
+		end
 		self:SyncSlotsIfChanged()
 		self:UpdateIndicator()
 	end
@@ -694,7 +731,7 @@ script UICombatControlLogic extends Logic
 		end
 		-- Dim the whole pad when it can't affect anything: AUTO mode, or a loadout with no LINE skill
 		-- (mage/thief/warrior) ??a clear visual cue that direction is irrelevant for these skills.
-		if self.combatMode ~= "MANUAL" or not self:LoadoutUsesDirection() then
+		if self.combatMode ~= "MANUAL" or not _WaveLogic.IsAttackConfirmPending or not self:LoadoutUsesDirection() then
 			btn.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 0.4)
 		elseif self.combatDirection == direction then
 			btn.SpriteGUIRendererComponent.Color = Color(0.45, 0.78, 0.5, 1)
@@ -896,7 +933,7 @@ script UICombatControlLogic extends Logic
 		if indicator == nil then
 			return
 		end
-		if self.combatMode ~= "MANUAL" then
+		if self.combatMode ~= "MANUAL" or not _WaveLogic.IsAttackConfirmPending then
 			indicator.Visible = false
 			return
 		end
