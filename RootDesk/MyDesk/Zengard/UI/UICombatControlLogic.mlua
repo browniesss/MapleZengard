@@ -338,6 +338,7 @@ script UICombatControlLogic extends Logic
 	method void OnAttackSequenceStarted(AttackSequenceStartedEvent event)
 		-- Config changes mid-sequence would desync the server snapshot, so input is locked (짠3).
 		self:SetInputLocked(true)
+		_SkillRangePreviewLogic:HideSkillRange()
 		log("[UICombatControlLogic] input locked: zen=" .. tostring(event.zenIndex))
 	end
 
@@ -388,17 +389,13 @@ script UICombatControlLogic extends Logic
 			return
 		end
 		if self.combatMode ~= "MANUAL" then
-			_UIToastLogic:ShowMessage("?먮룞 紐⑤뱶?먯꽌??怨듦꺽 諛⑺뼢??吏?뺥븷 ???놁뒿?덈떎")
-			return
-		end
-		if not self:LoadoutUsesDirection() then
-			-- Nearest-target and fixed-area skills ignore direction; do not send a no-op config update.
-			_UIToastLogic:ShowMessage("현재 스킬 구성은 방향을 사용하지 않습니다")
+			_UIToastLogic:ShowMessage("자동 모드에서는 방향을 직접 지정할 수 없습니다")
 			return
 		end
 		self.combatDirection = direction
 		self:SendCombatConfig()
 		self:RefreshDirections()
+		_SkillRangePreviewLogic:ShowAllSkillRanges(direction)
 		log("[UICombatControlLogic] direction set: " .. direction)
 	end
 
@@ -729,9 +726,8 @@ script UICombatControlLogic extends Logic
 		if not isvalid(btn) or not isvalid(btn.SpriteGUIRendererComponent) then
 			return
 		end
-		-- Dim the whole pad when it can't affect anything: AUTO mode, or a loadout with no LINE skill
-		-- (mage/thief/warrior) ??a clear visual cue that direction is irrelevant for these skills.
-		if self.combatMode ~= "MANUAL" or not _WaveLogic.IsAttackConfirmPending or not self:LoadoutUsesDirection() then
+		-- Dim only when the pad cannot be used; direction clicks also reveal full owned-skill ranges.
+		if self.combatMode ~= "MANUAL" or not _WaveLogic.IsAttackConfirmPending then
 			btn.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 0.4)
 		elseif self.combatDirection == direction then
 			btn.SpriteGUIRendererComponent.Color = Color(0.45, 0.78, 0.5, 1)

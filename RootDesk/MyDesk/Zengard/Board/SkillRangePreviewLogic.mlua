@@ -139,9 +139,66 @@ script SkillRangePreviewLogic extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void ShowAllSkillRanges(string direction)
+		-- Direction-pad preview: paints the union of every owned active skill range from the current board cell.
+		if not self:EnsurePool() then
+			return
+		end
+		local casterCell = self:ResolveLocalCasterCell()
+		if casterCell == nil then
+			self:HideSkillRange()
+			return
+		end
+		if direction == nil or direction == "" then
+			direction = self:ResolveDirection()
+		end
+		local snap = _SkillInventoryLogic.clientSkillState
+		if snap == nil or snap.order == nil then
+			self:HideSkillRange()
+			return
+		end
+		local used = 0
+		local seen = {}
+		local targets = {}
+		for _, skillId in ipairs(snap.order) do
+			local data = _SkillDataLogic:GetSkillData(skillId)
+			if data ~= nil and data.kind ~= "PASSIVE" and data.shape ~= nil and data.shape ~= "PASSIVE" then
+				if data.shape == "RANGED_TARGET" or data.shape == "RANGED_CHAIN" or data.shape == "RANGED_SPLASH" then
+					used = self:PaintRangedCoverage(casterCell, data, seen, used)
+					local nearest = self:FindNearestMonsterCell(casterCell, data.range or 0)
+					if nearest ~= nil then
+						table.insert(targets, nearest)
+					end
+				else
+					used = self:PaintShapeCellsMerged(skillId, casterCell, direction, seen, used)
+				end
+				if used >= #self.pool then
+					break
+				end
+			end
+		end
+		for _, target in ipairs(targets) do
+			self:RecolorPlacedCell(target.col, target.row, self.targetColor)
+		end
+		self:HideFrom(used + 1)
+		log("[SkillRangePreviewLogic] ShowAllSkillRanges direction=" .. tostring(direction) .. " cells=" .. tostring(used))
+	end
+
+	@ExecSpace("ClientOnly")
 	method void HideSkillRange()
 		-- Public QA/wiring entry: hides every pooled highlight.
 		self:HideFrom(1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table ResolveLocalCasterCell()
+		-- Converts the local player's board-piece position to a stable cell, compensating for the foot offset.
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then
+			return nil
+		end
+		local pwp = player.TransformComponent.WorldPosition
+		return _BoardLogic:WorldToCell(Vector3(pwp.x, pwp.y - _BoardConfig.PLAYER_VERTICAL_OFFSET, 0))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -156,6 +213,48 @@ script SkillRangePreviewLogic extends Logic
 			end
 			count += 1
 			self:PlaceHighlight(count, cell.col, cell.row, self.rangeColor)
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer PaintShapeCellsMerged(string skillId, table casterCell, string direction, table seen, integer startIndex)
+		-- Adds shape cells to the current preview without duplicating cells already painted by another skill.
+		local cells = _AttackPatternLogic:ResolveSkillCells(skillId, casterCell.col, casterCell.row, direction)
+		local count = startIndex
+		for _, cell in ipairs(cells) do
+			if count >= #self.pool then
+				break
+			end
+			local key = tostring(cell.col) .. ":" .. tostring(cell.row)
+			if seen[key] == nil then
+				seen[key] = true
+				count += 1
+				self:PlaceHighlight(count, cell.col, cell.row, self.rangeColor)
+			end
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer PaintRangedCoverage(table casterCell, any data, table seen, integer startIndex)
+		-- Adds ranged coverage cells to the current preview, preserving one highlight per board cell.
+		local range = data.range or 0
+		local count = startIndex
+		for col = 0, _BoardConfig.GRID_COLS - 1 do
+			for row = 0, _BoardConfig.GRID_ROWS - 1 do
+				if _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, col, row, range) then
+					if count >= #self.pool then
+						break
+					end
+					local key = tostring(col) .. ":" .. tostring(row)
+					if seen[key] == nil then
+						seen[key] = true
+						count += 1
+						self:PlaceHighlight(count, col, row, self.rangeColor)
+					end
+				end
+			end
 		end
 		return count
 	end
@@ -237,6 +336,20 @@ script SkillRangePreviewLogic extends Logic
 		end)
 		return candidates[1]
 	end
+
+	@ExecSpace("ClientOnly")
+	method void RecolorPlacedCell(integer col, integer row, Color color)
+		-- Recolors an already-visible highlight if the union preview contains the requested target cell.
+		for i = 1, #self.pool do
+			local placed = self.poolCells[i]
+			local hl = self.pool[i]
+			if placed ~= nil and placed.col == col and placed.row == row and isvalid(hl) and isvalid(hl.SpriteRendererComponent) then
+				hl.SpriteRendererComponent.Color = color
+				return
+			end
+		end
+	end
+
 
 	@ExecSpace("ClientOnly")
 	method void PlaceHighlight(integer poolIndex, integer col, integer row, Color color)
