@@ -111,13 +111,18 @@ script SkillChoiceLogic extends Logic
 		-- Levelup candidate roll (§7.1): NEW + LEVELUP pool, then an activated fusion slot substitution.
 		-- p.15: joined companions share the same weighted pool, each candidate tagged with ownerId+label.
 		local job = self:GetUserJob(userId)
-		local pool = self:CollectOwnerCandidates(userId, job, true, "")
+		local playerPool = self:CollectOwnerCandidates(userId, job, true, "내 선택")
+		for _, candidate in ipairs(playerPool) do
+			candidate.targetKind = "PLAYER"
+		end
+		local companionPool = {}
 
 		-- Companion skill cards (p.15 "동료 또한 본캐릭터와 같이 스킬 성장 가능").
 		for _, companion in ipairs(_CompanionLogic:GetActiveCompanions()) do
 			if companion.baseJob ~= "" then
 				for _, candidate in ipairs(self:CollectOwnerCandidates(companion.companionId, companion.baseJob, false, companion.displayLabel)) do
-					table.insert(pool, candidate)
+					candidate.targetKind = "COMPANION"
+					table.insert(companionPool, candidate)
 				end
 			end
 		end
@@ -125,10 +130,16 @@ script SkillChoiceLogic extends Logic
 		-- Weighted sampling without replacement keeps high-tier base offers readable.
 		local result = {}
 		for i = 1, slotCount do
-			if #pool == 0 then
+			local useCompanion = (#companionPool > 0 and _UtilLogic:RandomIntegerRange(1, 2) == 2)
+			if useCompanion then
+				table.insert(result, self:DrawWeightedCandidate(companionPool, userId))
+			elseif #playerPool > 0 then
+				table.insert(result, self:DrawWeightedCandidate(playerPool, userId))
+			elseif #companionPool > 0 then
+				table.insert(result, self:DrawWeightedCandidate(companionPool, userId))
+			else
 				break
 			end
-			table.insert(result, self:DrawWeightedCandidate(pool, userId))
 		end
 
 		-- Fusion slot substitution (R10, D5) — base char only; replaces a base-char slot.
@@ -146,7 +157,7 @@ script SkillChoiceLogic extends Logic
 				local recipeId = activated[_UtilLogic:RandomIntegerRange(1, #activated)]
 				local recipe = _SkillDataLogic:GetRecipe(recipeId)
 				local slot = baseSlots[_UtilLogic:RandomIntegerRange(1, #baseSlots)]
-				result[slot] = { skillId = recipe.result, kind = "FUSION", recipeId = recipeId, ownerId = userId, ownerLabel = "" }
+				result[slot] = { skillId = recipe.result, kind = "FUSION", recipeId = recipeId, ownerId = userId, ownerLabel = "내 선택", targetKind = "PLAYER" }
 			end
 		end
 
@@ -265,7 +276,12 @@ script SkillChoiceLogic extends Logic
 		-- Compact "skillId(kind)" join for V7 log verification (passives must be visible).
 		local parts = {}
 		for _, choice in ipairs(choices) do
-			table.insert(parts, choice.skillId .. "(" .. choice.kind .. ")")
+			local target = choice.targetKind or choice.ownerLabel or ""
+			if target ~= "" then
+				table.insert(parts, choice.skillId .. "(" .. choice.kind .. "/" .. target .. ")")
+			else
+				table.insert(parts, choice.skillId .. "(" .. choice.kind .. ")")
+			end
 		end
 		return table.concat(parts, ", ")
 	end

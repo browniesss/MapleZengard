@@ -6,6 +6,8 @@ script UIStageSelectLogic extends Logic
 
 	property Entity btnAdventure = "22ca59fe-5088-4397-b807-da124e0d2c62"
 
+	property Entity companionToggleBtn = "2b7ecae5-017c-4ea9-8223-e553eda3e9fc"
+
 	property TextComponent titleText = "e8d24c8a-0455-49e5-aa5f-b7097e76cffe"
 
 	property TextComponent modeBadgeText = "9b2dbaf6-f003-4f38-a8f2-07926a9230bf"
@@ -46,6 +48,8 @@ script UIStageSelectLogic extends Logic
 
 	property string selectedSkillId = ""
 
+	property boolean bringCompanion = true
+
 	-- two initial skill ids of the selected job (R9 / C-10)
 	property table jobSkillIds = {}
 
@@ -77,7 +81,7 @@ script UIStageSelectLogic extends Logic
 
 	method boolean TryWire()
 		-- Require fixed buttons and both panels (children of which are looked up below).
-		if not isvalid(self.btnBack) or not isvalid(self.btnAdventure) then return false end
+		if not isvalid(self.btnBack) or not isvalid(self.btnAdventure) or not isvalid(self.companionToggleBtn) then return false end
 		if not isvalid(self.skillBtnA) or not isvalid(self.skillBtnB) then return false end
 		if not isvalid(self.nodesPanel) or not isvalid(self.jobPanel) then return false end
 		-- All job cards and stage nodes must resolve before wiring; otherwise retry next frame.
@@ -94,6 +98,9 @@ script UIStageSelectLogic extends Logic
 			self:OnAdventureClicked()
 		end)
 		self:WireHover(self.btnAdventure)
+		self:WireButton(self.companionToggleBtn, function()
+			self:OnCompanionToggleClicked()
+		end)
 		self:WireButton(self.skillBtnA, function()
 			self:OnSkillClicked(1)
 		end)
@@ -126,6 +133,7 @@ script UIStageSelectLogic extends Logic
 		end
 		-- Defect C: skills stay hidden until a job is picked.
 		self:RefreshSkillButtons()
+		self:RefreshCompanionToggle()
 		log("[UIStageSelectLogic] wired")
 		return true
 	end
@@ -184,6 +192,7 @@ script UIStageSelectLogic extends Logic
 		end
 		_ModeStageLogic:RequestProgressSync()
 		self:RefreshNodes()
+		self:RefreshCompanionToggle()
 		-- Progress sync is async; one delayed refresh picks up the server reply.
 		if self.refreshTimerId ~= 0 then
 			_TimerService:ClearTimer(self.refreshTimerId)
@@ -391,6 +400,32 @@ script UIStageSelectLogic extends Logic
 		log("[UIStageSelectLogic] skill selected: " .. skillId)
 	end
 
+	method void OnCompanionToggleClicked()
+		self.bringCompanion = not self.bringCompanion
+		self:RefreshCompanionToggle()
+		log("[UIStageSelectLogic] companion toggle: " .. tostring(self.bringCompanion))
+	end
+
+	method void RefreshCompanionToggle()
+		if not isvalid(self.companionToggleBtn) then
+			return
+		end
+		if isvalid(self.companionToggleBtn.TextComponent) then
+			if self.bringCompanion then
+				self.companionToggleBtn.TextComponent.Text = "동료 ON"
+			else
+				self.companionToggleBtn.TextComponent.Text = "동료 OFF"
+			end
+		end
+		if isvalid(self.companionToggleBtn.SpriteGUIRendererComponent) then
+			if self.bringCompanion then
+				self.companionToggleBtn.SpriteGUIRendererComponent.Color = Color(0.78, 0.94, 0.23, 1)
+			else
+				self.companionToggleBtn.SpriteGUIRendererComponent.Color = Color(0.18, 0.11, 0.06, 0.96)
+			end
+		end
+	end
+
 	method void ApplySkillVisual()
 		-- Green tint marks the currently picked skill button.
 		self:TintSkillButton(self.skillBtnA, self.jobSkillIds[1])
@@ -497,8 +532,8 @@ script UIStageSelectLogic extends Logic
 			_UIToastLogic:ShowMessage("아직 잠긴 스테이지입니다")
 			return
 		end
-		log("[UIStageSelectLogic] enter requested: stage=" .. self.selectedStageId .. " mode=" .. self.currentMode .. " job=" .. self.selectedJobId .. " skill=" .. self.selectedSkillId)
-		_ModeStageLogic:RequestEnterStage(self.currentMode, self.selectedStageId, self.selectedJobId, self.selectedSkillId)
+		log("[UIStageSelectLogic] enter requested: stage=" .. self.selectedStageId .. " mode=" .. self.currentMode .. " job=" .. self.selectedJobId .. " skill=" .. self.selectedSkillId .. " companion=" .. tostring(self.bringCompanion))
+		_ModeStageLogic:RequestEnterStage(self.currentMode, self.selectedStageId, self.selectedJobId, self.selectedSkillId, self.bringCompanion)
 	end
 
 	method void OnBackClicked()

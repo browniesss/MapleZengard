@@ -120,6 +120,9 @@ script ZengardGameLogic extends Logic
 		ev.stageId = stageId
 		ev.mode = mode
 		self:SendGameEvent(ev)
+		if enterRunState.bringCompanion == true then
+			_CompanionLogic:SpawnStarterWarriorCompanion(userId)
+		end
 		log("[ZengardGameLogic] stage started: " .. stageId .. " mode=" .. mode .. " user=" .. userId)
 	end
 

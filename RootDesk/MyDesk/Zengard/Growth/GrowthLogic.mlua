@@ -218,7 +218,11 @@ script GrowthLogic extends Logic
 			if applied then
 				-- C-29: skillPoints is owned and decremented here on a confirmed skill pick.
 				state.skillPoints = math.max(0, state.skillPoints - 1)
-				if state.routeBranch == "" then
+				local pickedOwnerId = senderUserId
+				if resolution.choice ~= nil and resolution.choice.ownerId ~= nil and resolution.choice.ownerId ~= "" then
+					pickedOwnerId = resolution.choice.ownerId
+				end
+				if pickedOwnerId == senderUserId and state.routeBranch == "" then
 					local lockedBranch = self:GetAdvanceRouteOfSkill(resolution.id)
 					if lockedBranch ~= "" then
 						state.routeBranch = lockedBranch
@@ -499,9 +503,9 @@ script GrowthLogic extends Logic
 			if data ~= nil and _SkillChoiceLogic:IsTierEligible(state.userId, data) then
 				local level = _SkillInventoryLogic:GetSkillLevel(state.userId, skillId)
 				if level <= 0 and #_SkillInventoryLogic:GetOwnedSkills(state.userId) < _SkillDataLogic.MAX_OWNED_SKILLS then
-					table.insert(available, { skillId = skillId, kind = "NEW", ownerId = state.userId, ownerLabel = "" })
+					table.insert(available, { skillId = skillId, kind = "NEW", ownerId = state.userId, ownerLabel = "내 선택", targetKind = "PLAYER" })
 				elseif level > 0 and level < _SkillDataLogic.SKILL_MAX_LEVEL then
-					table.insert(available, { skillId = skillId, kind = "LEVELUP", ownerId = state.userId, ownerLabel = "" })
+					table.insert(available, { skillId = skillId, kind = "LEVELUP", ownerId = state.userId, ownerLabel = "내 선택", targetKind = "PLAYER" })
 				end
 			end
 		end
@@ -691,9 +695,21 @@ script GrowthLogic extends Logic
 			grade = "EPIC"
 			flash = true
 		end
-		if candidate.ownerLabel ~= nil and candidate.ownerLabel ~= "" then
-			-- Companion card: tag the name so the player can tell whose skill is growing.
-			skillName = "[동료 " .. candidate.ownerLabel .. "] " .. skillName
+		local targetLabel = ""
+		if candidate.targetKind == "COMPANION" then
+			targetLabel = "동료 선택"
+		elseif candidate.targetKind == "PLAYER" then
+			targetLabel = "내 선택"
+		elseif candidate.ownerLabel ~= nil and candidate.ownerLabel ~= "" then
+			targetLabel = "동료 선택"
+		end
+		if targetLabel ~= "" then
+			skillName = "[" .. targetLabel .. "] " .. skillName
+			if candidate.ownerLabel ~= nil and candidate.ownerLabel ~= "" and candidate.ownerLabel ~= "내 선택" then
+				desc = "대상: " .. candidate.ownerLabel .. " · " .. desc
+			else
+				desc = "대상: " .. targetLabel .. " · " .. desc
+			end
 		end
 		return { choiceId = candidate.skillId, kind = "SKILL", name = skillName, desc = desc, iconRuid = iconRuid, grade = grade, flash = flash }
 	end

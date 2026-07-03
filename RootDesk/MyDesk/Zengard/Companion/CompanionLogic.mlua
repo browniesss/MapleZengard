@@ -244,6 +244,19 @@ script CompanionLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method void SpawnStarterWarriorCompanion(string ownerUserId)
+		-- Stage-select loadout toggle: prototype always brings a warrior companion.
+		if self:GetCompanionCount() >= _CompanionConfig.MAX_COMPANIONS then
+			log_warning("[CompanionLogic] starter companion skipped: slots full")
+			return
+		end
+		local secondJob = "FIGHTER"
+		local initialSkillId = "warrior_power_strike"
+		self:SpawnCompanion("WARRIOR", secondJob, initialSkillId)
+		log("[CompanionLogic] starter warrior companion requested: owner=" .. tostring(ownerUserId))
+	end
+
+	@ExecSpace("ServerOnly")
 	method void RepositionAll()
 		-- Called by WaveLogic every zen (§1.2-4); companionId ascending keeps multi-companion runs deterministic (C-13).
 		local companionIds = {}

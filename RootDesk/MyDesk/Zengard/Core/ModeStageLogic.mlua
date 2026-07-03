@@ -40,7 +40,7 @@ script ModeStageLogic extends Logic
 	end
 
 	@ExecSpace("Server")
-	method void RequestEnterStage(string mode, string stageId, string jobId, string skillId)
+	method void RequestEnterStage(string mode, string stageId, string jobId, string skillId, boolean bringCompanion)
 		-- §7.2 entry validation: unlock -> cost -> runState -> StartStage. Server-authoritative.
 		local userId = senderUserId
 		log("[ModeStageLogic] enter requested: stage=" .. stageId .. " mode=" .. mode .. " user=" .. userId)
@@ -104,13 +104,14 @@ script ModeStageLogic extends Logic
 			stageId = stageId,
 			jobId = jobId,
 			skillId = skillId,
+			bringCompanion = bringCompanion == true,
 			continueLeft = modeCfg.continueLimit,
 			startedAt = _UtilLogic.ServerElapsedSeconds,
 		}
 		self.lastResult = ""
 		self.CurrentMode = mode
 		_ZengardGameLogic:StartStage(userId, stageId, jobId, skillId, self.runState)
-		log("[ModeStageLogic] stage entered: stage=" .. stageId .. " mode=" .. mode)
+		log("[ModeStageLogic] stage entered: stage=" .. stageId .. " mode=" .. mode .. " companion=" .. tostring(self.runState.bringCompanion))
 	end
 
 	@ExecSpace("Server")

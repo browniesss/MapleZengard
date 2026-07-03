@@ -493,7 +493,7 @@ script UIResultLogic extends Logic
 			return
 		end
 		log("[UIResultLogic] retry requested: stage=" .. self.lastStageId)
-		_ModeStageLogic:RequestEnterStage(self.lastMode, self.lastStageId, self.cachedJobId, self.cachedSkillId)
+		_ModeStageLogic:RequestEnterStage(self.lastMode, self.lastStageId, self.cachedJobId, self.cachedSkillId, false)
 		-- Defer close to the StageStarted success signal; a server deny keeps the popup open (see ArmPendingClose).
 		self:ArmPendingClose()
 	end
@@ -517,7 +517,7 @@ script UIResultLogic extends Logic
 			return
 		end
 		log("[UIResultLogic] next stage requested: " .. nextStageId)
-		_ModeStageLogic:RequestEnterStage(self.lastMode, nextStageId, self.cachedJobId, self.cachedSkillId)
+		_ModeStageLogic:RequestEnterStage(self.lastMode, nextStageId, self.cachedJobId, self.cachedSkillId, false)
 		-- Defer close to the StageStarted success signal; a server deny keeps the popup open (see ArmPendingClose).
 		self:ArmPendingClose()
 	end
