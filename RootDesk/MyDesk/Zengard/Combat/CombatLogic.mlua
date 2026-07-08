@@ -359,6 +359,7 @@ script CombatLogic extends Logic
 			end
 			casterTc.Scale = Vector3(sign * math.abs(sc.x), sc.y, sc.z)
 		end
+		self:SendSkillCastStarted(entry, unit)
 		_CombatFxLogic:PlayCastFx(entry.skillId, cell.col, cell.row, direction)
 		-- Ranged/targeted skills (RANGED_TARGET: magic claw, double stab, lucky seven) land ON the
 		-- monster, so play the skill burst at each target cell — otherwise the effect only appears at
@@ -385,6 +386,20 @@ script CombatLogic extends Logic
 			table.insert(self.castQueue, self.queueCursor + 1, { ownerId = entry.ownerId, skillId = entry.skillId, isExtra = true, extraDamageMul = followDamageMul })
 			log("[CombatLogic] extra action: owner=" .. entry.ownerId .. " skill=" .. entry.skillId .. " damageMul=" .. tostring(followDamageMul))
 		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SendSkillCastStarted(table entry, table unit)
+		-- UI highlight follows the authoritative server cast queue, not a client-side timer guess.
+		local ev = SkillCastStartedEvent()
+		ev.zenIndex = self.currentZenIndex
+		ev.ownerId = entry.ownerId
+		ev.skillId = entry.skillId
+		ev.isCompanion = (unit ~= nil and unit.isCompanion == true)
+		ev.isExtra = (entry.isExtra == true)
+		ev.castIndex = self.queueCursor
+		ev.totalCasts = #self.castQueue
+		_ZengardGameLogic:SendGameEvent(ev)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -454,7 +469,12 @@ script CombatLogic extends Logic
 					end
 				end
 				if primary == nil then
-					primary = candidates[1]
+					if skillData.directionalTarget == true then
+						primary = self:PickDirectionalCandidate(candidates, cell, direction)
+					end
+					if primary == nil then
+						primary = candidates[1]
+					end
 				end
 				if primary == nil then
 					return targets
@@ -535,6 +555,40 @@ script CombatLogic extends Logic
 			targets = self:CollectMonstersInCells(cells, false)
 		end
 		return targets
+	end
+
+	@ExecSpace("ServerOnly")
+	method table PickDirectionalCandidate(table candidates, table cell, string direction)
+		-- Direction-aware ranged splash targeting: pick the closest candidate in the chosen half-plane,
+		-- then fall back to nearest overall. This keeps Arrow Rain's red impact preview and real hit
+		-- center aligned with the direction pad.
+		local delta = _AttackPatternLogic:DirectionToDelta(direction)
+		if delta.dc == 0 and delta.dr == 0 then
+			return nil
+		end
+		local filtered = {}
+		for _, m in ipairs(candidates) do
+			local dc = m.col - cell.col
+			local dr = m.row - cell.row
+			local forward = dc * delta.dc + dr * delta.dr
+			if forward > 0 then
+				local side = math.abs(dc * delta.dr - dr * delta.dc)
+				table.insert(filtered, { monster = m, forward = forward, side = side })
+			end
+		end
+		if #filtered == 0 then
+			return nil
+		end
+		table.sort(filtered, function(a, b)
+			if a.forward == b.forward then
+				if a.side == b.side then
+					return a.monster.monsterId < b.monster.monsterId
+				end
+				return a.side < b.side
+			end
+			return a.forward < b.forward
+		end)
+		return filtered[1].monster
 	end
 
 	@ExecSpace("ServerOnly")

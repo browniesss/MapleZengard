@@ -46,6 +46,16 @@ script UICombatControlLogic extends Logic
 
 	property string targetMonsterId = ""
 
+	property string activeSkillId = ""
+
+	property string activeSkillActor = ""
+
+	property string activeSkillOwnerId = ""
+
+	property integer activeCastIndex = 0
+
+	property integer activeCastTotal = 0
+
 	property boolean targetPickMode = false
 
 	property string localJobId = ""
@@ -106,6 +116,7 @@ script UICombatControlLogic extends Logic
 		self:SubscribeBus(JobSelectedEvent, self.OnJobSelected)
 		self:SubscribeBus(AttackSequenceStartedEvent, self.OnAttackSequenceStarted)
 		self:SubscribeBus(AttackSequenceEndedEvent, self.OnAttackSequenceEnded)
+		self:SubscribeBus(SkillCastStartedEvent, self.OnSkillCastStarted)
 		self.touchHandler = _InputService:ConnectEvent(ScreenTouchEvent, self.OnScreenTouch)
 		self.uiTimerId = _TimerService:SetTimerRepeat(self.TickUi, self.uiTickInterval)
 		log("[UICombatControlLogic] OnBeginPlay")
@@ -180,6 +191,7 @@ script UICombatControlLogic extends Logic
 			_TimerService:ClearTimer(self.uiTimerId)
 			self.uiTimerId = 0
 		end
+		self:ClearActiveSkillMarker()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -208,7 +220,7 @@ script UICombatControlLogic extends Logic
 		table.insert(self.uiHandlers, { entity = btn, evType = UITouchEnterEvent, evHandler = hoverH })
 		if slotIndex > 0 then
 			-- Press shows the range preview; release/normal (finger lifted or dragged off) hides it. The
-			-- short tap still fires ButtonClickEvent -> OnSlotClicked, so cast-order picking is unaffected.
+			-- drag path owns order editing; descriptions are shown by the owned-skill HUD.
 			local capturedIndex = slotIndex
 			local downH = btn:ConnectEvent(UITouchDownEvent, function()
 				self:OnSlotDragStart(capturedIndex)
@@ -279,6 +291,7 @@ script UICombatControlLogic extends Logic
 		self.combatMode = _CombatConfig.DEFAULT_COMBAT_MODE
 		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
 		self.targetMonsterId = ""
+		self:ClearActiveSkillMarker()
 		self.targetPickMode = false
 		self.lastAttackConfirmPending = false
 		self.castOrderIds = {}
@@ -300,6 +313,7 @@ script UICombatControlLogic extends Logic
 		-- Hide with the run; UIResultLogic owns the end-of-stage screen.
 		self.inStage = false
 		self.targetPickMode = false
+		self:ClearActiveSkillMarker()
 		self.lastAttackConfirmPending = false
 		if isvalid(self.groupRoot) then
 			self.groupRoot.Enable = false
@@ -317,6 +331,7 @@ script UICombatControlLogic extends Logic
 		end
 		self.combatDirection = _CombatConfig.DEFAULT_DIRECTION
 		self.targetMonsterId = ""
+		self:ClearActiveSkillMarker()
 		self.targetPickMode = false
 		self:SendCombatConfig()
 		self:RefreshAll()
@@ -336,18 +351,53 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnAttackSequenceStarted(AttackSequenceStartedEvent event)
-		-- Config changes mid-sequence would desync the server snapshot, so input is locked (짠3).
+		-- Config changes mid-sequence would desync the server snapshot, so input is locked.
+		self:ClearActiveSkillMarker()
 		self:SetInputLocked(true)
 		_SkillRangePreviewLogic:HideSkillRange()
+		self:RefreshSlots()
 		log("[UICombatControlLogic] input locked: zen=" .. tostring(event.zenIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkillCastStarted(SkillCastStartedEvent event)
+		-- Highlight only the local player's cast stream plus shared companion casts.
+		if not self.inStage then
+			return
+		end
+		local localUserId = self:GetLocalUserId()
+		if event.isCompanion ~= true and event.ownerId ~= localUserId then
+			return
+		end
+		self.activeSkillId = event.skillId
+		self.activeSkillOwnerId = event.ownerId
+		self.activeSkillActor = "PLAYER"
+		if event.isCompanion == true then
+			self.activeSkillActor = "COMPANION"
+		end
+		self.activeCastIndex = event.castIndex
+		self.activeCastTotal = event.totalCasts
+		self:RefreshSlots()
+		log("[UICombatControlLogic] active cast: owner=" .. event.ownerId .. " skill=" .. event.skillId .. " companion=" .. tostring(event.isCompanion))
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnAttackSequenceEnded(AttackSequenceEndedEvent event)
 		-- Unlock and re-render: kills during the sequence may have changed the owned-skill mirror.
+		self:ClearActiveSkillMarker()
 		self:SetInputLocked(false)
 		self:RefreshSlots()
 		log("[UICombatControlLogic] input unlocked: zen=" .. tostring(event.zenIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearActiveSkillMarker()
+		-- Server events now tell the exact active cast, so clearing only resets displayed state.
+		self.activeSkillId = ""
+		self.activeSkillActor = ""
+		self.activeSkillOwnerId = ""
+		self.activeCastIndex = 0
+		self.activeCastTotal = 0
 	end
 
 	@ExecSpace("ClientOnly")
@@ -380,16 +430,16 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnDirectionClicked(string direction)
-		-- Manual-only input (p.8: no direction setting while in auto play).
+		-- Manual-only input. A direction is selected after Zen has placed the board.
 		if not self.inStage or self.inputLocked then
 			return
 		end
 		if not _WaveLogic.IsAttackConfirmPending then
-			_UIToastLogic:ShowMessage("Press ZEN first, then choose a direction")
+			_UIToastLogic:ShowMessage("먼저 젠을 누른 뒤 방향을 선택하세요.")
 			return
 		end
 		if self.combatMode ~= "MANUAL" then
-			_UIToastLogic:ShowMessage("자동 모드에서는 방향을 직접 지정할 수 없습니다")
+			_UIToastLogic:ShowMessage("자동 모드에서는 방향을 직접 지정할 수 없습니다.")
 			return
 		end
 		self.combatDirection = direction
@@ -398,7 +448,6 @@ script UICombatControlLogic extends Logic
 		_SkillRangePreviewLogic:ShowAllSkillRanges(direction)
 		log("[UICombatControlLogic] direction set: " .. direction)
 	end
-
 	@ExecSpace("ClientOnly")
 	method string GetCombatDirection()
 		-- Public accessor for SkillRangePreviewLogic: LINE-shape previews track the live pad direction.
@@ -425,25 +474,24 @@ script UICombatControlLogic extends Logic
 			return
 		end
 		if not _WaveLogic.IsAttackConfirmPending then
-			_UIToastLogic:ShowMessage("Press ZEN first, then choose a target")
+			_UIToastLogic:ShowMessage("먼저 젠을 누른 뒤 타깃을 선택하세요.")
 			return
 		end
 		if self.localJobId ~= "thief" then
-			_UIToastLogic:ShowMessage("?꾩쟻留??寃잛쓣 吏?뺥븷 ???덉뒿?덈떎")
+			_UIToastLogic:ShowMessage("도적만 직접 타깃을 지정할 수 있습니다.")
 			return
 		end
 		if self.combatMode ~= "MANUAL" then
-			_UIToastLogic:ShowMessage("?섎룞 紐⑤뱶?먯꽌留??寃잛쓣 吏?뺥븷 ???덉뒿?덈떎")
+			_UIToastLogic:ShowMessage("수동 모드에서만 타깃을 지정할 수 있습니다.")
 			return
 		end
 		self.targetPickMode = not self.targetPickMode
 		self:RefreshTargetUi()
 		log("[UICombatControlLogic] target pick mode: " .. tostring(self.targetPickMode))
 	end
-
 	@ExecSpace("ClientOnly")
 	method void OnSlotClicked(integer slotIndex)
-		-- Tapping only previews skill info; order editing is handled by slot drag/drop.
+		-- Skill descriptions belong to the owned-skill HUD. This panel is only for drag/drop order editing.
 		if not self.inStage or self.inputLocked then
 			return
 		end
@@ -451,11 +499,6 @@ script UICombatControlLogic extends Logic
 			self.suppressNextSlotClick = false
 			return
 		end
-		local skillId = self.castOrderIds[slotIndex]
-		if skillId == nil then
-			return
-		end
-		self:ShowSkillInfo(skillId)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -528,49 +571,38 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method string DescribeTargeting(any data)
-		-- Plain-language targeting so the direction pad's relevance (or irrelevance) is obvious.
 		local shape = data.shape
-		if shape == "RANGED_TARGET" then
-			return "사거리 " .. tostring(data.range) .. "칸 내 가장 가까운 적 자동 타겟(방향 무관)"
+		if data.kind == "PASSIVE" or shape == nil or shape == "PASSIVE" then
+			return "패시브 효과가 자동으로 적용됩니다."
+		elseif shape == "RANGED_TARGET" then
+			return "사거리 " .. tostring(data.range) .. "칸 안의 가까운 적을 자동으로 타깃합니다."
 		elseif shape == "LINE" then
-			return "선택 방향으로 직선 " .. tostring(data.range) .. "칸(방향 지정)"
+			if data.linePierce == true then
+				return "선택한 방향으로 직선 " .. tostring(data.range) .. "칸을 관통 공격합니다."
+			end
+			return "선택한 방향의 첫 번째 적만 공격합니다."
 		elseif shape == "FRONT_ARC" then
-			return "선택 방향 전방 부채꼴 범위(방향 지정)"
+			return "선택한 방향 앞쪽 부채꼴 범위를 공격합니다."
 		elseif shape == "ADJACENT4" then
-			return "상하좌우 인접 4칸 전체"
+			return "상하좌우 인접 4칸 전체를 공격합니다."
 		elseif shape == "ADJACENT4_SINGLE" then
-			return "인접 4칸 중 1체"
+			return "인접 4칸 중 적 하나를 공격합니다."
 		elseif shape == "ADJACENT8" then
-			return "주위 8칸 전체"
+			return "주위 8칸 전체를 공격합니다."
 		elseif shape == "CROSS2" then
-			return "상하좌우 2칸 십자 범위"
+			return "상하좌우 2칸 십자 범위를 공격합니다."
 		elseif shape == "RING2" then
-			return "주위 2칸 넓은 범위"
+			return "주위 2칸 고리 범위를 공격합니다."
 		elseif shape == "RANGED_SPLASH" then
-			return "사거리 " .. tostring(data.range) .. "칸 내 목표 주변 광역"
+			if data.directionalTarget == true then
+				return "선택한 방향의 적을 중심으로 광역 공격합니다."
+			end
+			return "사거리 " .. tostring(data.range) .. "칸 안의 목표 주변을 광역 공격합니다."
 		elseif shape == "RANGED_CHAIN" then
-			return "사거리 " .. tostring(data.range) .. "칸 내 연쇄 타격"
-		elseif shape == "PASSIVE" then
-			return "패시브 효과 자동 적용"
+			return "사거리 " .. tostring(data.range) .. "칸 안의 적을 연쇄 공격합니다."
 		end
-		return "특수 타겟"
+		return "특수 타깃 방식입니다."
 	end
-
-	@ExecSpace("ClientOnly")
-	method void ShowSkillInfo(string skillId)
-		-- One toast: name ??what it does / how it targets. Read from the shared skill catalog.
-		local data = _SkillDataLogic:GetSkillData(skillId)
-		if data == nil then
-			return
-		end
-		local msg = data.displayName
-		if data.desc ~= nil and data.desc ~= "" then
-			msg = msg .. " ??" .. data.desc
-		end
-		msg = msg .. " / " .. self:DescribeTargeting(data)
-		_UIToastLogic:ShowMessage(msg)
-	end
-
 	@ExecSpace("ClientOnly")
 	method void OnScreenTouch(ScreenTouchEvent event)
 		-- World tap -> board cell -> monsterId; only consumed while target picking is armed.
@@ -583,12 +615,12 @@ script UICombatControlLogic extends Logic
 		local worldPos = _UILogic:ScreenToWorldPosition(event.TouchPoint)
 		local cell = _BoardLogic:WorldToCell(Vector3(worldPos.x, worldPos.y, 0))
 		if cell == nil then
-			_UIToastLogic:ShowMessage("보드 위의 몬스터를 선택해 주세요")
+			_UIToastLogic:ShowMessage("보드 위의 몬스터를 선택하세요.")
 			return
 		end
 		local monsterId = self:FindMonsterIdAt(cell)
 		if monsterId == "" then
-			_UIToastLogic:ShowMessage("?대떦 移몄뿉 紐ъ뒪?곌? ?놁뒿?덈떎")
+			_UIToastLogic:ShowMessage("선택한 칸에는 지정할 몬스터가 없습니다.")
 			return
 		end
 		self.targetMonsterId = monsterId
@@ -597,7 +629,6 @@ script UICombatControlLogic extends Logic
 		self:RefreshTargetUi()
 		log("[UICombatControlLogic] target set: " .. monsterId .. " at (" .. cell.col .. "," .. cell.row .. ")")
 	end
-
 	@ExecSpace("ClientOnly")
 	method string FindMonsterIdAt(table cell)
 		-- MonsterLogic's registry is ServerOnly, so the client derives monsterId from the
@@ -738,15 +769,16 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void RefreshTargetUi()
-		-- Target widgets exist only for the thief loadout (D-11).
+		-- Target widgets exist only for the thief loadout and stay above the pad.
 		local isThief = (self.localJobId == "thief")
+		self:ApplyTargetControlLayout()
 		if isvalid(self.targetBtn) then
 			self.targetBtn.Enable = isThief
 			if isvalid(self.targetBtn.TextComponent) then
 				if self.targetPickMode then
-					self.targetBtn.TextComponent.Text = "?좏깮 痍⑥냼"
+					self.targetBtn.TextComponent.Text = "선택 중"
 				else
-					self.targetBtn.TextComponent.Text = "타겟 지정"
+					self.targetBtn.TextComponent.Text = "타깃 지정"
 				end
 			end
 		end
@@ -754,13 +786,23 @@ script UICombatControlLogic extends Logic
 			self.targetStateText.Enable = isThief
 			if isvalid(self.targetStateText.TextComponent) then
 				if self.targetPickMode then
-					self.targetStateText.TextComponent.Text = "紐ъ뒪?곕? ??븯?몄슂"
+					self.targetStateText.TextComponent.Text = "몬스터를 클릭하세요"
 				elseif self.targetMonsterId ~= "" then
-					self.targetStateText.TextComponent.Text = "?寃? " .. self.targetMonsterId
+					self.targetStateText.TextComponent.Text = "타깃: " .. self.targetMonsterId
 				else
-					self.targetStateText.TextComponent.Text = "?寃? ?먮룞(理쒓렐??"
+					self.targetStateText.TextComponent.Text = "타깃: 자동"
 				end
 			end
+		end
+	end
+	@ExecSpace("ClientOnly")
+	method void ApplyTargetControlLayout()
+		-- Keeps thief-only target controls in their own strip above the direction pad instead of overlapping arrows.
+		self:ApplyUiRect(self.targetBtn, AlignmentType.TopCenter, Vector2(0.5, 1), Vector2(0.5, 0.5), Vector2(0, -108), Vector2(150, 42))
+		self:ApplyUiRect(self.targetStateText, AlignmentType.TopCenter, Vector2(0.5, 1), Vector2(0.5, 0.5), Vector2(0, -148), Vector2(180, 32))
+		if isvalid(self.targetStateText) and isvalid(self.targetStateText.TextComponent) then
+			self.targetStateText.TextComponent.Alignment = TextAlignmentType.MiddleCenter
+			self.targetStateText.TextComponent.FontSize = 14
 		end
 	end
 
@@ -781,6 +823,7 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ApplySkillSlotRect(Entity slot, number y)
+		-- Fixed slot geometry prevents active/drag states from resizing the vertical order rail.
 		if not isvalid(slot) then
 			return
 		end
@@ -793,6 +836,7 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ApplyUiRect(Entity entity, AlignmentType alignment, Vector2 anchor, Vector2 pivot, Vector2 position, Vector2 size)
+		-- Centralized runtime rect patch for stale UI instances that predate the rebuilt layout.
 		if not isvalid(entity) or not isvalid(entity.UITransformComponent) then
 			return
 		end
@@ -809,7 +853,7 @@ script UICombatControlLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void RefreshSlots()
-		-- Renders the cast order from the client mirror; pending taps show their picked sequence.
+		-- Renders drag order, pending order, and the server-confirmed active cast in one pass.
 		local snap = _SkillInventoryLogic.clientSkillState
 		local order = {}
 		if snap ~= nil and snap.order ~= nil then
@@ -828,12 +872,12 @@ script UICombatControlLogic extends Logic
 					slot.Enable = true
 					local data = _SkillDataLogic:GetSkillData(skillId)
 					local skillName = skillId
+					local iconRuid = ""
 					if data ~= nil then
 						skillName = data.displayName
-					end
-					local iconRuid = ""
-					if data ~= nil and data.iconRuid ~= nil then
-						iconRuid = data.iconRuid
+						if data.iconRuid ~= nil then
+							iconRuid = data.iconRuid
+						end
 					end
 					local pendingIndex = 0
 					for p, pendingId in ipairs(self.pendingOrderIds) do
@@ -841,31 +885,69 @@ script UICombatControlLogic extends Logic
 							pendingIndex = p
 						end
 					end
+					local isActive = (self.activeSkillActor == "PLAYER" and self.activeSkillId ~= "" and self.activeSkillId == skillId)
 					local orderNo = tostring(i)
 					if pendingIndex > 0 then
 						orderNo = tostring(pendingIndex)
 					end
-					local label = self:FormatSkillSlotLabel(skillName)
+					if isActive then
+						orderNo = "ON"
+					end
 					local icon = slot:GetChildByName("Icon", false)
 					if isvalid(icon) then
 						icon.Enable = iconRuid ~= ""
 						if iconRuid ~= "" then
 							icon.SpriteGUIRendererComponent.ImageRUID = DataRef(iconRuid)
 						end
+						if isvalid(icon.SpriteGUIRendererComponent) then
+							if isActive then
+								icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+							else
+								icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 0.9)
+							end
+						end
 					end
 					local orderText = slot:GetChildByName("OrderText", false)
 					if isvalid(orderText) and isvalid(orderText.TextComponent) then
 						orderText.TextComponent.Text = orderNo
+						if isActive then
+							orderText.TextComponent.FontColor = Color(1, 1, 1, 1)
+							orderText.TextComponent.Bold = true
+							orderText.TextComponent.FontSize = 17
+						else
+							orderText.TextComponent.FontColor = Color(1, 1, 1, 1)
+							orderText.TextComponent.Bold = false
+							orderText.TextComponent.FontSize = 16
+						end
 					end
 					local labelText = slot:GetChildByName("Label", false)
 					if isvalid(labelText) and isvalid(labelText.TextComponent) then
-						labelText.TextComponent.Text = label
+						labelText.TextComponent.Text = self:FormatSkillSlotLabel(skillName)
+						if isActive then
+							labelText.TextComponent.FontColor = Color(1, 1, 1, 1)
+							labelText.TextComponent.Bold = true
+						else
+							labelText.TextComponent.FontColor = Color(1, 1, 1, 1)
+							labelText.TextComponent.Bold = false
+						end
 					end
 					if isvalid(slot.TextComponent) then
 						slot.TextComponent.Text = ""
 					end
+					local orderBadge = slot:GetChildByName("OrderBadge", false)
+					if isvalid(orderBadge) and isvalid(orderBadge.SpriteGUIRendererComponent) then
+						if isActive then
+							orderBadge.SpriteGUIRendererComponent.Color = Color(1, 0.18, 0.04, 1)
+						elseif pendingIndex > 0 then
+							orderBadge.SpriteGUIRendererComponent.Color = Color(0.25, 0.68, 0.34, 1)
+						else
+							orderBadge.SpriteGUIRendererComponent.Color = Color(0.45, 0.28, 0.14, 1)
+						end
+					end
 					if isvalid(slot.SpriteGUIRendererComponent) then
-						if self.dragFromSlot == i then
+						if isActive then
+							slot.SpriteGUIRendererComponent.Color = Color(1, 0.32, 0.06, 1)
+						elseif self.dragFromSlot == i then
 							slot.SpriteGUIRendererComponent.Color = Color(1, 0.72, 0.22, 1)
 						elseif self.dragOverSlot == i then
 							slot.SpriteGUIRendererComponent.Color = Color(0.45, 0.78, 0.5, 1)
@@ -875,50 +957,81 @@ script UICombatControlLogic extends Logic
 							slot.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
 						end
 					end
+					if isvalid(slot.UITransformComponent) then
+						if isActive then
+							slot.UITransformComponent.UIScale = Vector3(1.1, 1.1, 1)
+						elseif self.dragFromSlot == i or self.dragOverSlot == i then
+							slot.UITransformComponent.UIScale = Vector3(1.05, 1.05, 1)
+						else
+							slot.UITransformComponent.UIScale = Vector3(1, 1, 1)
+						end
+					end
 				end
 			end
 		end
 		if isvalid(self.orderTitleText) and isvalid(self.orderTitleText.TextComponent) then
 			if self.dragFromSlot > 0 then
-				self.orderTitleText.TextComponent.Text = "드래그 정렬"
+				self.orderTitleText.TextComponent.Text = "드래그로 순서 변경"
+				self.orderTitleText.TextComponent.FontColor = Color(1, 0.94, 0.42, 1)
+			elseif self.activeSkillId ~= "" then
+				if self.activeSkillActor == "COMPANION" then
+					self.orderTitleText.TextComponent.Text = "동료 발동: " .. self:GetActiveSkillLabel() .. self:GetActiveCastProgressText()
+				else
+					self.orderTitleText.TextComponent.Text = "발동 중: " .. self:GetActiveSkillLabel() .. self:GetActiveCastProgressText()
+				end
+				self.orderTitleText.TextComponent.FontColor = Color(1, 0.55, 0.18, 1)
 			elseif #self.pendingOrderIds > 0 then
 				self.orderTitleText.TextComponent.Text = "순서 지정 중 (" .. #self.pendingOrderIds .. "/" .. #self.castOrderIds .. ")"
+				self.orderTitleText.TextComponent.FontColor = Color(0.72, 1, 0.72, 1)
 			else
 				self.orderTitleText.TextComponent.Text = "스킬 순서"
+				self.orderTitleText.TextComponent.FontColor = Color(1, 0.9, 0.35, 1)
 			end
 		end
 	end
-
 	@ExecSpace("ClientOnly")
 	method string FormatSkillSlotLabel(string skillName)
-		-- Keeps long Korean skill names inside the compact order slots.
+		-- Compact aliases keep common Maple skill names readable inside 184x46 order slots.
 		local aliases = {
 			["파워 스트라이크"] = "파워\n스트라이크",
 			["슬래시 블러스트"] = "슬래시\n블러스트",
 			["애로우 블로우"] = "애로우\n블로우",
-			["아이언 애로우"] = "아이언\n애로우",
-			["애로우 봄"] = "애로우 봄",
-			["애로우 레인"] = "애로우 레인",
-			["매직 클로"] = "매직 클로",
+			["더블 아이스샷"] = "더블\n아이스샷",
 			["에너지 볼트"] = "에너지\n볼트",
-			["에너지 클로"] = "에너지\n클로",
-			["파이어 애로우"] = "파이어\n애로우",
-			["썬더 볼트"] = "썬더 볼트",
-			["썬더 스피어"] = "썬더\n스피어",
-			["아이스 스트라이크"] = "아이스\n스트라이크",
-			["쉐도우 파트너"] = "쉐도우\n파트너",
 			["새비지 블로우"] = "새비지\n블로우",
+			["쉐도우 파트너"] = "쉐도우\n파트너",
 			["트리플 세븐"] = "트리플\n세븐",
-			["웨폰 부스터"] = "웨폰\n부스터",
-			["매직 부스터"] = "매직\n부스터",
-			["소울 애로우"] = "소울\n애로우",
+			["쉐도우 어썰트"] = "쉐도우\n어썰트",
+			["드래곤 로어"] = "드래곤\n로어",
+			["애로우 레인"] = "애로우\n레인",
 			["크리티컬 샷"] = "크리티컬\n샷",
+			["스펠 마스터리"] = "스펠\n마스터리",
+			["엘리먼트 앰플리피케이션"] = "엘리먼트\n앰플",
 		}
 		local alias = aliases[skillName]
 		if alias ~= nil then
 			return alias
 		end
 		return skillName
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetActiveSkillLabel()
+		-- The title can show companion skills even when they are not in the player's order slots.
+		local data = _SkillDataLogic:GetSkillData(self.activeSkillId)
+		if data ~= nil and data.displayName ~= nil then
+			return data.displayName
+		end
+		return self.activeSkillId
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetActiveCastProgressText()
+		-- Makes multi-cast chains explicit: player skill 1, player skill 2, companion skill, etc.
+		if self.activeCastIndex > 0 and self.activeCastTotal > 0 then
+			return " (" .. tostring(self.activeCastIndex) .. "/" .. tostring(self.activeCastTotal) .. ")"
+		end
+		return ""
 	end
 
 	@ExecSpace("ClientOnly")

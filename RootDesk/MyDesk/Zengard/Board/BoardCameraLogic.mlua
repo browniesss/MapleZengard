@@ -39,13 +39,42 @@ script BoardCameraLogic extends Logic
 
 	property any stageEndedHandler = nil
 
+	property boolean stageActive = false
+
+	property boolean pendingBoardCameraSwitch = false
+
+	property number pendingBoardCameraElapsed = 0
+
+	property number pendingBoardCameraWarnAfter = 2.0
+
 	method void OnBeginPlay()
+		-- Subscribe once; the actual camera switch may retry until LocalPlayer.CurrentMap exists.
 		self.stageStartedHandler = _ZengardGameLogic:ConnectEvent(StageStartedEvent, self.OnStageStarted)
 		self.stageEndedHandler = _ZengardGameLogic:ConnectEvent(StageEndedEvent, self.OnStageEnded)
 		log("[BoardCameraLogic] OnBeginPlay")
 	end
 
+	method void OnUpdate(number delta)
+		-- StageStarted can arrive before the client player/map is valid, so retry briefly instead of
+		-- falling back to the moving player camera on the first frame.
+		if not self:IsClient() then
+			return
+		end
+		if not self.stageActive or not self.pendingBoardCameraSwitch then
+			return
+		end
+		if self:TrySwitchBoardCamera() then
+			return
+		end
+		self.pendingBoardCameraElapsed += delta
+		if self.pendingBoardCameraElapsed >= self.pendingBoardCameraWarnAfter then
+			self.pendingBoardCameraSwitch = false
+			log_warning("[BoardCameraLogic] board camera not ready after retry; view will follow the player")
+		end
+	end
+
 	method void OnEndPlay()
+		-- Release subscriptions and any client-only camera entity created for the board view.
 		if self.stageStartedHandler ~= nil then
 			_ZengardGameLogic:DisconnectEvent(StageStartedEvent, self.stageStartedHandler)
 			self.stageStartedHandler = nil
@@ -58,17 +87,23 @@ script BoardCameraLogic extends Logic
 	end
 
 	method void OnStageStarted(StageStartedEvent event)
-		-- Switch to the static board camera for the whole stage. It never moves, so the board never moves.
-		if not self:EnsureBoardCamera() then
-			log_warning("[BoardCameraLogic] board camera not ready; view will follow the player")
+		-- Arm a retrying switch; the client player/map can lag behind the relayed stage event.
+		if not self:IsClient() then
 			return
 		end
-		_CameraService:SwitchCameraTo(self.boardCam.CameraComponent)
-		log("[BoardCameraLogic] switched to static board camera")
+		self.stageActive = true
+		self.pendingBoardCameraSwitch = true
+		self.pendingBoardCameraElapsed = 0
+		self:TrySwitchBoardCamera()
 	end
 
 	method void OnStageEnded(StageEndedEvent event)
 		-- Hand the view back to the normal player-follow camera and drop the board camera.
+		if not self:IsClient() then
+			return
+		end
+		self.stageActive = false
+		self.pendingBoardCameraSwitch = false
 		local player = _UserService.LocalPlayer
 		if isvalid(player) and isvalid(player.CameraComponent) then
 			_CameraService:SwitchCameraTo(player.CameraComponent)
@@ -77,9 +112,26 @@ script BoardCameraLogic extends Logic
 		log("[BoardCameraLogic] restored player camera")
 	end
 
+	method boolean TrySwitchBoardCamera()
+		-- Switch to the static board camera once all client-side camera prerequisites exist.
+		if not self:IsClient() then
+			return false
+		end
+		if not self:EnsureBoardCamera() then
+			return false
+		end
+		_CameraService:SwitchCameraTo(self.boardCam.CameraComponent)
+		self.pendingBoardCameraSwitch = false
+		log("[BoardCameraLogic] switched to static board camera")
+		return true
+	end
+
 	method boolean EnsureBoardCamera()
 		-- Lazily spawn the static camera entity, add a CameraComponent, place it at the board view center,
 		-- and set its zoom. Returns false (caller bails) until the local player + map are ready.
+		if not self:IsClient() then
+			return false
+		end
 		if isvalid(self.boardCam) and isvalid(self.boardCam.CameraComponent) then
 			return true
 		end
@@ -108,6 +160,7 @@ script BoardCameraLogic extends Logic
 	end
 
 	method void DestroyBoardCamera()
+		-- Removes the client-only static camera entity if one was spawned.
 		if isvalid(self.boardCam) then
 			self.boardCam:Destroy()
 		end

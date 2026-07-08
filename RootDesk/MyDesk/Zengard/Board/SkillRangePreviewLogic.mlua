@@ -92,8 +92,8 @@ script SkillRangePreviewLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ShowSkillRange(integer slotIndex)
-		-- Public QA/wiring entry: highlights the pressed slot's skill range from the caster's current
-		-- board cell + combat direction. PASSIVE skills have no preview. Pool size caps the visible cells.
+		-- Highlight only the cells that would actually be hit by this skill. Non-piercing LINE skills
+		-- therefore show the first monster only instead of painting the whole ray.
 		if not self:EnsurePool() then
 			return
 		end
@@ -103,44 +103,25 @@ script SkillRangePreviewLogic extends Logic
 			return
 		end
 		local data = _SkillDataLogic:GetSkillData(skillId)
-		if data == nil then
+		if data == nil or data.kind == "PASSIVE" or data.shape == nil or data.shape == "PASSIVE" then
 			self:HideSkillRange()
 			return
 		end
-		if data.kind == "PASSIVE" or data.shape == nil then
-			-- Passives (kind="PASSIVE", no shape field) always auto-apply; there is no cell range to
-			-- show. The nil-shape guard also bails on any malformed record before the log concat below.
-			self:HideSkillRange()
-			return
-		end
-		local player = _UserService.LocalPlayer
-		if not isvalid(player) then
-			self:HideSkillRange()
-			return
-		end
-		-- Undo the player foot offset (-0.40 = half a cell) before WorldToCell so the caster cell does not
-		-- flip to the neighbouring row on a boundary; otherwise the range preview highlights the wrong row.
-		local pwp = player.TransformComponent.WorldPosition
-		local casterCell = _BoardLogic:WorldToCell(Vector3(pwp.x, pwp.y - _BoardConfig.PLAYER_VERTICAL_OFFSET, 0))
+		local casterCell = self:ResolveLocalCasterCell()
 		if casterCell == nil then
 			self:HideSkillRange()
 			return
 		end
 		local direction = self:ResolveDirection()
-		local used = 0
-		if data.shape == "RANGED_TARGET" or data.shape == "RANGED_CHAIN" or data.shape == "RANGED_SPLASH" then
-			used = self:PaintRangedTarget(casterCell, data)
-		else
-			used = self:PaintShapeCells(skillId, casterCell, direction)
-		end
+		local used = self:PaintActualTargets(skillId, data, casterCell, direction, nil, 0)
 		self:HideFrom(used + 1)
 		log("[SkillRangePreviewLogic] ShowSkillRange slot=" .. tostring(slotIndex) .. " skill=" .. skillId ..
-			" shape=" .. tostring(data.shape) .. " cells=" .. tostring(used))
+			" shape=" .. tostring(data.shape) .. " targets=" .. tostring(used))
 	end
 
 	@ExecSpace("ClientOnly")
 	method void ShowAllSkillRanges(string direction)
-		-- Direction-pad preview: paints the union of every owned active skill range from the current board cell.
+		-- Direction-pad preview: paints the union of actual hit targets for every owned active skill.
 		if not self:EnsurePool() then
 			return
 		end
@@ -159,29 +140,17 @@ script SkillRangePreviewLogic extends Logic
 		end
 		local used = 0
 		local seen = {}
-		local targets = {}
 		for _, skillId in ipairs(snap.order) do
 			local data = _SkillDataLogic:GetSkillData(skillId)
 			if data ~= nil and data.kind ~= "PASSIVE" and data.shape ~= nil and data.shape ~= "PASSIVE" then
-				if data.shape == "RANGED_TARGET" or data.shape == "RANGED_CHAIN" or data.shape == "RANGED_SPLASH" then
-					used = self:PaintRangedCoverage(casterCell, data, seen, used)
-					local nearest = self:FindNearestMonsterCell(casterCell, data.range or 0)
-					if nearest ~= nil then
-						table.insert(targets, nearest)
-					end
-				else
-					used = self:PaintShapeCellsMerged(skillId, casterCell, direction, seen, used)
-				end
+				used = self:PaintActualTargets(skillId, data, casterCell, direction, seen, used)
 				if used >= #self.pool then
 					break
 				end
 			end
 		end
-		for _, target in ipairs(targets) do
-			self:RecolorPlacedCell(target.col, target.row, self.targetColor)
-		end
 		self:HideFrom(used + 1)
-		log("[SkillRangePreviewLogic] ShowAllSkillRanges direction=" .. tostring(direction) .. " cells=" .. tostring(used))
+		log("[SkillRangePreviewLogic] ShowAllSkillRanges direction=" .. tostring(direction) .. " targets=" .. tostring(used))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -202,139 +171,199 @@ script SkillRangePreviewLogic extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
-	method integer PaintShapeCells(string skillId, table casterCell, string direction)
-		-- LINE / ADJACENT4 / ADJACENT4_SINGLE / ADJACENT8 share AttackPatternLogic's cell resolver, so
-		-- the preview is byte-identical to the server's hit cells. Returns the count painted.
-		local cells = _AttackPatternLogic:ResolveSkillCells(skillId, casterCell.col, casterCell.row, direction)
-		local count = 0
-		for _, cell in ipairs(cells) do
-			if count >= #self.pool then
-				break
-			end
-			count += 1
-			self:PlaceHighlight(count, cell.col, cell.row, self.rangeColor)
-		end
-		return count
-	end
-
-	@ExecSpace("ClientOnly")
-	method integer PaintShapeCellsMerged(string skillId, table casterCell, string direction, table seen, integer startIndex)
-		-- Adds shape cells to the current preview without duplicating cells already painted by another skill.
-		local cells = _AttackPatternLogic:ResolveSkillCells(skillId, casterCell.col, casterCell.row, direction)
+	method integer PaintActualTargets(string skillId, any data, table casterCell, string direction, table seen, integer startIndex)
+		local targets = self:ResolvePreviewTargets(skillId, data, casterCell, direction)
 		local count = startIndex
-		for _, cell in ipairs(cells) do
+		for _, target in ipairs(targets) do
 			if count >= #self.pool then
 				break
 			end
-			local key = tostring(cell.col) .. ":" .. tostring(cell.row)
-			if seen[key] == nil then
-				seen[key] = true
+			local key = tostring(target.col) .. ":" .. tostring(target.row)
+			if seen == nil or seen[key] == nil then
+				if seen ~= nil then
+					seen[key] = true
+				end
 				count += 1
-				self:PlaceHighlight(count, cell.col, cell.row, self.rangeColor)
+				self:PlaceHighlight(count, target.col, target.row, self.targetColor)
 			end
 		end
 		return count
 	end
 
 	@ExecSpace("ClientOnly")
-	method integer PaintRangedCoverage(table casterCell, any data, table seen, integer startIndex)
-		-- Adds ranged coverage cells to the current preview, preserving one highlight per board cell.
-		local range = data.range or 0
-		local count = startIndex
-		for col = 0, _BoardConfig.GRID_COLS - 1 do
-			for row = 0, _BoardConfig.GRID_ROWS - 1 do
-				if _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, col, row, range) then
-					if count >= #self.pool then
-						break
-					end
-					local key = tostring(col) .. ":" .. tostring(row)
-					if seen[key] == nil then
-						seen[key] = true
-						count += 1
-						self:PlaceHighlight(count, col, row, self.rangeColor)
-					end
-				end
-			end
+	method table ResolvePreviewTargets(string skillId, any data, table casterCell, string direction)
+		local shape = data.shape
+		if shape == "RANGED_TARGET" or shape == "RANGED_CHAIN" or shape == "RANGED_SPLASH" then
+			return self:ResolveRangedPreviewTargets(data, casterCell, direction)
 		end
-		return count
+		local cells = _AttackPatternLogic:ResolveSkillCells(skillId, casterCell.col, casterCell.row, direction)
+		if shape == "ADJACENT4_SINGLE" then
+			local targets = self:CollectPreviewMonstersInCells(cells, false)
+			local maxTargets = 1
+			while #targets > maxTargets do
+				table.remove(targets)
+			end
+			return targets
+		elseif shape == "LINE" then
+			return self:CollectPreviewMonstersInCells(cells, data.linePierce ~= true)
+		end
+		return self:CollectPreviewMonstersInCells(cells, false)
 	end
 
 	@ExecSpace("ClientOnly")
-	method integer PaintRangedTarget(table casterCell, any data)
-		-- RANGED_TARGET shows the whole Chebyshev range as the teal field, then overpaints the actual
-		-- auto-target (nearest alive monster, monsterId tiebreak — mirrors CombatLogic:ResolveTargets) red.
+	method table ResolveRangedPreviewTargets(any data, table casterCell, string direction)
+		local alive = self:GetAliveMonsterCells()
+		local candidates = {}
 		local range = data.range or 0
-		local count = 0
-		for col = 0, _BoardConfig.GRID_COLS - 1 do
-			for row = 0, _BoardConfig.GRID_ROWS - 1 do
-				if _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, col, row, range) then
-					if count >= #self.pool then
-						break
-					end
-					count += 1
-					self:PlaceHighlight(count, col, row, self.rangeColor)
-				end
+		for _, m in ipairs(alive) do
+			if _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, m.col, m.row, range) then
+				table.insert(candidates, m)
 			end
 		end
-		local nearest = self:FindNearestMonsterCell(casterCell, range)
-		if nearest ~= nil then
-			-- Recolor the existing pooled highlight that already sits on the target cell. The placed-cell
-			-- lookup is the logic-side parallel table, not an entity field.
-			for i = 1, count do
-				local placed = self.poolCells[i]
-				local hl = self.pool[i]
-				if placed ~= nil and placed.col == nearest.col and placed.row == nearest.row then
-					if isvalid(hl) and isvalid(hl.SpriteRendererComponent) then
-						hl.SpriteRendererComponent.Color = self.targetColor
-					end
+		local fallbackNearest = false
+		if #candidates == 0 then
+			for _, m in ipairs(alive) do
+				table.insert(candidates, m)
+			end
+			fallbackNearest = true
+		end
+		if #candidates == 0 then
+			return {}
+		end
+		self:SortNearest(candidates, casterCell.col, casterCell.row)
+		if fallbackNearest then
+			return { candidates[1] }
+		end
+		local maxTargets = data.maxTargets or 1
+		if maxTargets < 1 then
+			maxTargets = 1
+		end
+		if data.shape == "RANGED_SPLASH" then
+			local primary = nil
+			if data.directionalTarget == true then
+				primary = self:PickDirectionalCandidate(candidates, casterCell, direction)
+			end
+			if primary == nil then
+				primary = candidates[1]
+			end
+			local splash = {}
+			local splashRadius = data.splashRadius or 1
+			for _, m in ipairs(alive) do
+				if _AttackPatternLogic:IsInRange(primary.col, primary.row, m.col, m.row, splashRadius) then
+					table.insert(splash, m)
+				end
+			end
+			self:SortNearest(splash, primary.col, primary.row)
+			while #splash > maxTargets do
+				table.remove(splash)
+			end
+			return splash
+		elseif data.shape == "RANGED_CHAIN" then
+			while #candidates > maxTargets do
+				table.remove(candidates)
+			end
+			return candidates
+		end
+		while #candidates > maxTargets do
+			table.remove(candidates)
+		end
+		return candidates
+	end
+
+	@ExecSpace("ClientOnly")
+	method table CollectPreviewMonstersInCells(table cells, boolean stopAtFirst)
+		local found = {}
+		local seen = {}
+		for _, cell in ipairs(cells) do
+			local m = self:FindMonsterCellAt(cell.col, cell.row)
+			if m ~= nil and seen[m.monsterId] == nil then
+				seen[m.monsterId] = true
+				table.insert(found, m)
+				if stopAtFirst then
 					break
 				end
 			end
-			log("[SkillRangePreviewLogic] ranged target cell=(" .. tostring(nearest.col) .. "," .. tostring(nearest.row) .. ")")
 		end
-		return count
+		return found
 	end
 
 	@ExecSpace("ClientOnly")
-	method table FindNearestMonsterCell(table casterCell, integer range)
-		-- Client-side nearest-target resolution mirroring CombatLogic:ResolveTargets (§D-11): scan
-		-- MonsterUnit entities, keep alive ones in Chebyshev range, sort by distance then monsterId.
+	method table FindMonsterCellAt(integer col, integer row)
+		local alive = self:GetAliveMonsterCells()
+		for _, m in ipairs(alive) do
+			if m.col == col and m.row == row then
+				return m
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetAliveMonsterCells()
 		local player = _UserService.LocalPlayer
 		if not isvalid(player) or not isvalid(player.CurrentMap) then
-			return nil
+			return {}
 		end
 		local units = player.CurrentMap:GetChildComponentsByTypeName("script.MonsterUnit", true)
-		local candidates = {}
+		local found = {}
 		for _, comp in ipairs(units) do
 			---@type MonsterUnit
 			local unit = comp
 			if isvalid(unit) and unit.IsDead ~= true and isvalid(unit.Entity) then
 				local cell = _BoardLogic:WorldToCell(unit.Entity.TransformComponent.WorldPosition)
-				if cell ~= nil and _AttackPatternLogic:IsInRange(casterCell.col, casterCell.row, cell.col, cell.row, range) then
-					-- Spawn naming contract "<typeId>_mon_<n>" (MonsterLogic:148/175). If a future rename
-					-- breaks the suffix, fall back to the full entity name so the monster still ranks for
-					-- distance instead of vanishing from the highlight; the tiebreak stays a string compare
-					-- consistent with CombatLogic:ResolveTargets (D-11).
+				if cell ~= nil then
 					local monsterId = string.match(unit.Entity.Name, "(mon_%d+)$")
 					if monsterId == nil then
 						monsterId = unit.Entity.Name
 					end
-					table.insert(candidates, { col = cell.col, row = cell.row, monsterId = monsterId })
+					table.insert(found, { col = cell.col, row = cell.row, monsterId = monsterId })
 				end
 			end
 		end
-		if #candidates == 0 then
-			return nil
-		end
-		table.sort(candidates, function(a, b)
-			local da = math.max(math.abs(a.col - casterCell.col), math.abs(a.row - casterCell.row))
-			local db = math.max(math.abs(b.col - casterCell.col), math.abs(b.row - casterCell.row))
+		return found
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SortNearest(table list, integer originCol, integer originRow)
+		table.sort(list, function(a, b)
+			local da = math.max(math.abs(a.col - originCol), math.abs(a.row - originRow))
+			local db = math.max(math.abs(b.col - originCol), math.abs(b.row - originRow))
 			if da == db then
 				return a.monsterId < b.monsterId
 			end
 			return da < db
 		end)
-		return candidates[1]
+	end
+
+	@ExecSpace("ClientOnly")
+	method table PickDirectionalCandidate(table candidates, table casterCell, string direction)
+		local delta = _AttackPatternLogic:DirectionToDelta(direction)
+		if delta.dc == 0 and delta.dr == 0 then
+			return nil
+		end
+		local filtered = {}
+		for _, m in ipairs(candidates) do
+			local dc = m.col - casterCell.col
+			local dr = m.row - casterCell.row
+			local forward = dc * delta.dc + dr * delta.dr
+			if forward > 0 then
+				local side = math.abs(dc * delta.dr - dr * delta.dc)
+				table.insert(filtered, { monster = m, forward = forward, side = side })
+			end
+		end
+		if #filtered == 0 then
+			return nil
+		end
+		table.sort(filtered, function(a, b)
+			if a.forward == b.forward then
+				if a.side == b.side then
+					return a.monster.monsterId < b.monster.monsterId
+				end
+				return a.side < b.side
+			end
+			return a.forward < b.forward
+		end)
+		return filtered[1].monster
 	end
 
 	@ExecSpace("ClientOnly")

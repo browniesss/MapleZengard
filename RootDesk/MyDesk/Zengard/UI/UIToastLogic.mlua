@@ -13,6 +13,8 @@ script UIToastLogic extends Logic
 
 	property number TOAST_FADE_DURATION = 0.3
 
+	property number LONG_TOAST_DURATION = 4.2
+
 	property integer fadeTimerId = 0
 
 	property table busHandlers = {}
@@ -96,6 +98,8 @@ script UIToastLogic extends Logic
 			log("[UIToastLogic] ShowMessage queued before wire: " .. msg)
 			return
 		end
+		local longMessage = self:IsLongMessage(msg)
+		self:ApplyToastLayout(longMessage)
 		self.messageText.Text = msg
 		self.toastRoot.Enable = true
 		local canvasGroup = self.toastRoot.CanvasGroupComponent
@@ -106,37 +110,88 @@ script UIToastLogic extends Logic
 		end
 		local elapsed = 0
 		local prevTime = _UtilLogic.ElapsedSeconds
+		local holdDuration = self.TOAST_DURATION
+		if longMessage then
+			holdDuration = self.LONG_TOAST_DURATION
+		end
 		self.fadeTimerId = _TimerService:SetTimerRepeat(function()
 			-- ElapsedSeconds frame-diff: the timer interval itself is not exact (runtime-patterns caveat 12).
 			local now = _UtilLogic.ElapsedSeconds
 			elapsed += now - prevTime
 			prevTime = now
-			if elapsed >= self.TOAST_DURATION + self.TOAST_FADE_DURATION then
+			if elapsed >= holdDuration + self.TOAST_FADE_DURATION then
 				canvasGroup.GroupAlpha = 0
 				self.toastRoot.Enable = false
 				_TimerService:ClearTimer(self.fadeTimerId)
 				self.fadeTimerId = 0
-			elseif elapsed >= self.TOAST_DURATION then
-				canvasGroup.GroupAlpha = 1 - (elapsed - self.TOAST_DURATION) / self.TOAST_FADE_DURATION
+			elseif elapsed >= holdDuration then
+				canvasGroup.GroupAlpha = 1 - (elapsed - holdDuration) / self.TOAST_FADE_DURATION
 			end
 		end, 1 / 60)
 		log("[UIToastLogic] toast shown: " .. msg)
 	end
 
+	method boolean IsLongMessage(string msg)
+		if msg == nil then
+			return false
+		end
+		if string.find(msg, "\n") ~= nil then
+			return true
+		end
+		return string.len(msg) >= 72
+	end
+
+	method void ApplyToastLayout(boolean longMessage)
+		-- Skill tooltips need multiple lines; default toast size was tuned for short rewards.
+		if isvalid(self.messageText) then
+			self.messageText.Overflow = OverflowType.Overflow
+			self.messageText.BestFit = true
+			self.messageText.MinSize = 12
+			self.messageText.UseConstraintX = true
+			self.messageText.UseConstraintY = true
+			if longMessage then
+				self.messageText.MaxSize = 17
+				self.messageText.Alignment = TextAlignmentType.MiddleLeft
+				self.messageText.ConstraintX = 660
+				self.messageText.ConstraintY = 126
+			else
+				self.messageText.MaxSize = 19
+				self.messageText.Alignment = TextAlignmentType.MiddleCenter
+				self.messageText.ConstraintX = 500
+				self.messageText.ConstraintY = 54
+			end
+		end
+		if isvalid(self.toastRoot) and isvalid(self.toastRoot.UITransformComponent) then
+			if longMessage then
+				self.toastRoot.UITransformComponent.RectSize = Vector2(720, 150)
+			else
+				self.toastRoot.UITransformComponent.RectSize = Vector2(560, 72)
+			end
+		end
+		local textEntity = nil
+		if isvalid(self.messageText) then
+			textEntity = self.messageText.Entity
+		end
+		if isvalid(textEntity) and isvalid(textEntity.UITransformComponent) then
+			if longMessage then
+				textEntity.UITransformComponent.RectSize = Vector2(660, 126)
+			else
+				textEntity.UITransformComponent.RectSize = Vector2(500, 54)
+			end
+		end
+	end
+
 	method void OnZenStarted(ZenStartedEvent event)
-		-- Boss zen only — toasting every normal zen would spam each button press (§3 consumer role).
 		if event.isBossZen then
-			self:ShowMessage("보스 머쉬맘이 등장합니다!")
+			self:ShowMessage("보스 몬스터가 등장합니다!")
 		end
 	end
 
 	method void OnFusionActivated(FusionActivatedEvent event)
-		-- Recipe ids are internal vocabulary; the toast stays generic Korean copy.
 		self:ShowMessage("스킬 합성이 활성화되었습니다!")
 	end
 
 	method void OnSkillFused(SkillFusedEvent event)
-		-- Fusion completion notice (§3: SkillFusedEvent → UIToastLogic).
 		self:ShowMessage("스킬 합성 완료!")
 	end
 
@@ -153,7 +208,6 @@ script UIToastLogic extends Logic
 	end
 
 	method string BuildChoiceResolvedToast(string kind, string id)
-		-- Converts internal choice ids to player-facing reward copy.
 		if kind == "SKILL" or kind == "FUSION" then
 			local skill = _SkillDataLogic:GetSkillData(id)
 			if skill ~= nil and skill.displayName ~= nil then

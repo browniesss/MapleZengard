@@ -258,6 +258,9 @@ script ZengardGameLogic extends Logic
 		self:AddRelay("AttackSequenceEndedEvent", AttackSequenceEndedEvent, function(e)
 			return { zenIndex = e.zenIndex, totalKills = e.totalKills }
 		end)
+		self:AddRelay("SkillCastStartedEvent", SkillCastStartedEvent, function(e)
+			return { zenIndex = e.zenIndex, ownerId = e.ownerId, skillId = e.skillId, isCompanion = e.isCompanion, isExtra = e.isExtra, castIndex = e.castIndex, totalCasts = e.totalCasts }
+		end)
 		self:AddRelay("LevelUpEvent", LevelUpEvent, function(e)
 			return { userId = e.userId, newLevel = e.newLevel }
 		end)
@@ -396,6 +399,17 @@ script ZengardGameLogic extends Logic
 			local e = AttackSequenceEndedEvent()
 			e.zenIndex = t.zenIndex or 0
 			e.totalKills = t.totalKills or 0
+			return e
+		end
+		d["SkillCastStartedEvent"] = function(t)
+			local e = SkillCastStartedEvent()
+			e.zenIndex = t.zenIndex or 0
+			e.ownerId = t.ownerId or ""
+			e.skillId = t.skillId or ""
+			e.isCompanion = (t.isCompanion == true)
+			e.isExtra = (t.isExtra == true)
+			e.castIndex = t.castIndex or 0
+			e.totalCasts = t.totalCasts or 0
 			return e
 		end
 		d["LevelUpEvent"] = function(t)

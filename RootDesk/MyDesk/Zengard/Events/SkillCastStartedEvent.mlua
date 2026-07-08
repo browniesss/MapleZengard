@@ -1,0 +1,18 @@
+@Event
+script SkillCastStartedEvent extends EventType
+
+	property integer zenIndex = 0
+
+	property string ownerId = ""
+
+	property string skillId = ""
+
+	property boolean isCompanion = false
+
+	property boolean isExtra = false
+
+	property integer castIndex = 0
+
+	property integer totalCasts = 0
+
+end

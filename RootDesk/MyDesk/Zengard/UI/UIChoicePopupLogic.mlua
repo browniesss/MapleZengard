@@ -251,6 +251,10 @@ script UIChoicePopupLogic extends Logic
 		if isvalid(descText) then
 			descText.TextComponent.Text = self:FormatCardDescription(card.desc or "")
 			descText.TextComponent.FontColor = Color.FromHexCode("#CBD5E1")
+			descText.TextComponent.Overflow = OverflowType.Overflow
+			descText.TextComponent.BestFit = true
+			descText.TextComponent.MinSize = 12
+			descText.TextComponent.MaxSize = 18
 		end
 		local gradeText = cardEntity:GetChildByName("GradeText", false)
 		if isvalid(gradeText) then
@@ -292,65 +296,10 @@ script UIChoicePopupLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method string FormatCardDescription(string desc)
-		-- Splits space-delimited descriptions into two compact lines for the narrow card body.
 		if desc == nil or desc == "" then
 			return ""
 		end
-		local first = ""
-		local second = ""
-		for word in string.gmatch(desc, "%S+") do
-			if first == "" then
-				first = word
-			elseif string.len(first .. " " .. word) <= 34 then
-				first = first .. " " .. word
-			elseif second == "" then
-				second = word
-			elseif string.len(second .. " " .. word) <= 38 then
-				second = second .. " " .. word
-			else
-				second = second .. "..."
-				break
-			end
-		end
-		if second == "" then
-			return first
-		end
-		return first .. "\n" .. second
-	end
-
-	@ExecSpace("ClientOnly")
-	method Color GetGradeTitleColor(string grade)
-		if grade == "EPIC" then
-			return Color.FromHexCode("#F5D0FE")
-		end
-		if grade == "RARE" then
-			return Color.FromHexCode("#BFDBFE")
-		end
-		return Color.FromHexCode("#F8FAFC")
-	end
-
-	@ExecSpace("ClientOnly")
-	method Color GetGradeBackgroundColor(string grade)
-		-- Uses a dark card body so grade color reads as a premium accent, not a flat full-card fill.
-		if grade == "EPIC" then
-			return Color.FromHexCode("#241038")
-		end
-		if grade == "RARE" then
-			return Color.FromHexCode("#0E2442")
-		end
-		return Color.FromHexCode("#18202B")
-	end
-
-	@ExecSpace("ClientOnly")
-	method Color GetGradeIconSlotColor(string grade)
-		-- Tints the icon well slightly toward the grade while keeping item/skill icons readable.
-		if grade == "EPIC" then
-			return Color.FromHexCode("#3D1B5C")
-		end
-		if grade == "RARE" then
-			return Color.FromHexCode("#143A68")
-		end
-		return Color.FromHexCode("#263241")
+		return desc
 	end
 
 	@ExecSpace("ClientOnly")
@@ -366,12 +315,44 @@ script UIChoicePopupLogic extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method Color GetGradeBackgroundColor(string grade)
+		if grade == "EPIC" then
+			return Color.FromHexCode("#241236")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#10233F")
+		end
+		return Color.FromHexCode("#1E293B")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Color GetGradeIconSlotColor(string grade)
+		if grade == "EPIC" then
+			return Color.FromHexCode("#4C1D95")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#1D4ED8")
+		end
+		return Color.FromHexCode("#334155")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Color GetGradeTitleColor(string grade)
+		if grade == "EPIC" then
+			return Color.FromHexCode("#F0ABFC")
+		end
+		if grade == "RARE" then
+			return Color.FromHexCode("#93C5FD")
+		end
+		return Color.FromHexCode("#F8FAFC")
+	end
+
+	@ExecSpace("ClientOnly")
 	method void UpdateRerollLabel(integer remaining)
-		-- Reroll button reflects the shared per-stage counter (C-23); 0 disables the button (E9).
 		if not isvalid(self.btnReroll) then
 			return
 		end
-		self.btnReroll.TextComponent.Text = "리롤 (남은 " .. remaining .. "회)"
+		self.btnReroll.TextComponent.Text = "리롤 (남은 " .. remaining .. ")"
 		self.btnReroll.ButtonComponent.Enable = remaining > 0
 	end
 
@@ -527,7 +508,6 @@ script UIChoicePopupLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnLootChanged(LootChangedEvent event)
-		-- §3: loot balance drives the advance/expand affordance readout.
 		if not self:IsLocalUser(event.userId) then
 			return
 		end
@@ -535,8 +515,6 @@ script UIChoicePopupLogic extends Logic
 		if isvalid(self.lootText) then
 			self.lootText.Text = "전리품 " .. event.amount
 		end
-		-- Re-evaluate the expand button live: loot can cross the cost threshold while the popup
-		-- is open. nil flag = client-side derivation from the freshly cached loot balance.
 		if self.isOpen then
 			self:RefreshAffordances(nil)
 		end

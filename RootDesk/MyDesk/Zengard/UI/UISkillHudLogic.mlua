@@ -2,7 +2,21 @@
 script UISkillHudLogic extends Logic
 
 	-- Entity refs injected by UIBuilder bind (C-21) — ui/SkillHUD.ui
+	property Entity hudGroup = "872a06fd-d1ae-44c0-8546-7b1b724bd5fa"
+
 	property Entity rootGroup = "3b17d761-1ece-4c13-b07c-6f977bc175da"
+
+	property Entity tooltipPanel = "64e812ab-4bea-4b61-94c0-b7e127893b44"
+
+	property TextComponent tooltipText = "b12f48bf-d94e-4632-b6d6-107e7b152c8d"
+
+	property Entity tooltipIcon = "9811f5e6-4f08-4cc1-98b0-0d2275f67ee7"
+
+	property TextComponent tooltipTitleText = "a3b10768-0511-4fe7-ae5e-81ee4ddfd2dc"
+
+	property TextComponent tooltipDescText = "cb995bd8-ef94-4b8c-87f1-854fed1c4124"
+
+	property TextComponent tooltipTargetText = "24a95059-3dff-4102-8761-8982d6449354"
 
 	property Entity slot1 = "f9149b08-5a87-4a58-b7d8-9e12181e305b"
 
@@ -28,7 +42,13 @@ script UISkillHudLogic extends Logic
 	-- Slot refs are gathered in TryWire because client UI entities aren't valid in OnBeginPlay.
 	property boolean wired = false
 
+	property boolean inStage = false
+
 	property table busHandlers = {}
+
+	property table uiHandlers = {}
+
+	property integer hoverSlotIndex = 0
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -52,9 +72,17 @@ script UISkillHudLogic extends Logic
 			end
 		end
 		self.slots = refs
-		if isvalid(self.rootGroup) then
-			self.rootGroup.Enable = false
+		for i = 1, #refs do
+			self:WireSlotHover(i, refs[i])
 		end
+		self:ApplyRootLayout()
+		if isvalid(self.hudGroup) then
+			self.hudGroup.Enable = self.inStage
+		end
+		if isvalid(self.rootGroup) then
+			self.rootGroup.Enable = self.inStage
+		end
+		self:HideSkillTooltip()
 		log("[UISkillHud] wired")
 		return true
 	end
@@ -66,6 +94,12 @@ script UISkillHudLogic extends Logic
 			_ZengardGameLogic:DisconnectEvent(rec.evType, rec.evHandler)
 		end
 		self.busHandlers = {}
+		for _, rec in ipairs(self.uiHandlers) do
+			if isvalid(rec.entity) then
+				rec.entity:DisconnectEvent(rec.evType, rec.evHandler)
+			end
+		end
+		self.uiHandlers = {}
 	end
 
 	@ExecSpace("ClientOnly")
@@ -73,6 +107,49 @@ script UISkillHudLogic extends Logic
 		-- Tracks a game-bus subscription so OnEndPlay can disconnect it.
 		local evHandler = _ZengardGameLogic:ConnectEvent(eventType, callback)
 		table.insert(self.busHandlers, { evType = eventType, evHandler = evHandler })
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireSlotHover(integer slotIndex, Entity slotEntity)
+		-- Wire the slot plus its top hit-area so hovering the icon/text also opens the tooltip.
+		if not isvalid(slotEntity) then
+			return
+		end
+		self:WireTooltipTarget(slotIndex, slotEntity)
+		local hitArea = slotEntity:GetChildByName("HoverHitArea", false)
+		self:WireTooltipTarget(slotIndex, hitArea)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WireTooltipTarget(integer slotIndex, Entity targetEntity)
+		-- A target must have a UITouchReceiveComponent or equivalent UI input receiver.
+		if not isvalid(targetEntity) then
+			return
+		end
+		local downHandler = targetEntity:ConnectEvent(UITouchDownEvent, function()
+			self:ShowSkillTooltip(slotIndex)
+		end)
+		table.insert(self.uiHandlers, { entity = targetEntity, evType = UITouchDownEvent, evHandler = downHandler })
+		local enterHandler = targetEntity:ConnectEvent(UITouchEnterEvent, function()
+			self:ShowSkillTooltip(slotIndex)
+		end)
+		table.insert(self.uiHandlers, { entity = targetEntity, evType = UITouchEnterEvent, evHandler = enterHandler })
+		local stateHandler = targetEntity:ConnectEvent(ButtonStateChangeEvent, function(event)
+			if event.state == ButtonState.Hover or event.state == ButtonState.Pressed or event.state == ButtonState.Clicked then
+				self:ShowSkillTooltip(slotIndex)
+			elseif event.state == ButtonState.Normal or event.state == ButtonState.Released then
+				self:HideSkillTooltip()
+			end
+		end)
+		table.insert(self.uiHandlers, { entity = targetEntity, evType = ButtonStateChangeEvent, evHandler = stateHandler })
+		local clickHandler = targetEntity:ConnectEvent(ButtonClickEvent, function()
+			self:ShowSkillTooltip(slotIndex)
+		end)
+		table.insert(self.uiHandlers, { entity = targetEntity, evType = ButtonClickEvent, evHandler = clickHandler })
+		local exitHandler = targetEntity:ConnectEvent(UITouchExitEvent, function()
+			self:HideSkillTooltip()
+		end)
+		table.insert(self.uiHandlers, { entity = targetEntity, evType = UITouchExitEvent, evHandler = exitHandler })
 	end
 
 	@ExecSpace("ClientOnly")
@@ -87,15 +164,22 @@ script UISkillHudLogic extends Logic
 		end
 		local state = _SkillInventoryLogic.clientSkillState
 		if state == self.lastState then
+			self:UpdateHoverTooltip()
 			return
 		end
 		self.lastState = state
 		self:Refresh(state)
+		self:UpdateHoverTooltip()
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnStageStarted(StageStartedEvent event)
 		-- Skill HUD lives only inside a run (§5.2 DefaultShow=false).
+		self.inStage = true
+		self:ApplyRootLayout()
+		if isvalid(self.hudGroup) then
+			self.hudGroup.Enable = true
+		end
 		if isvalid(self.rootGroup) then
 			self.rootGroup.Enable = true
 		end
@@ -106,11 +190,17 @@ script UISkillHudLogic extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnStageEnded(StageEndedEvent event)
 		-- Run teardown: hide and forget the snapshot so the next run starts clean.
+		self.inStage = false
+		if isvalid(self.hudGroup) then
+			self.hudGroup.Enable = false
+		end
 		if isvalid(self.rootGroup) then
 			self.rootGroup.Enable = false
 		end
 		self.lastState = nil
+		self.hoverSlotIndex = 0
 		self:ClearSlots()
+		self:HideSkillTooltip()
 		log("[UISkillHud] hidden (stage " .. event.result .. ")")
 	end
 
@@ -204,6 +294,216 @@ script UISkillHudLogic extends Logic
 		if isvalid(badge) then
 			badge.Enable = showBadge
 		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowSkillTooltip(integer slotIndex)
+		-- Tooltips read from the local owned-skill snapshot so they match the left-bottom HUD slot.
+		local state = self.lastState
+		if state == nil or state.skills == nil then
+			return
+		end
+		if state.ownerId ~= self:GetLocalUserId() then
+			return
+		end
+		local rec = state.skills[slotIndex]
+		if rec == nil then
+			return
+		end
+		local data = _SkillDataLogic:GetSkillData(rec.skillId)
+		if data == nil then
+			return
+		end
+		local msg = data.displayName .. " Lv." .. tostring(rec.level)
+		if data.desc ~= nil and data.desc ~= "" then
+			msg = msg .. "\n" .. data.desc
+		end
+		local targetText = ""
+		if _UICombatControlLogic ~= nil then
+			targetText = _UICombatControlLogic:DescribeTargeting(data)
+			msg = msg .. "\n" .. targetText
+		end
+		if isvalid(self.tooltipPanel) and isvalid(self.tooltipTitleText) and isvalid(self.tooltipDescText) and isvalid(self.tooltipTargetText) then
+			self:ApplyTooltipLayout()
+			self.tooltipTitleText.Text = data.displayName .. " Lv." .. tostring(rec.level)
+			self.tooltipDescText.Text = data.desc or ""
+			self.tooltipTargetText.Text = targetText
+			if isvalid(self.tooltipIcon) and isvalid(self.tooltipIcon.SpriteGUIRendererComponent) then
+				local iconRuid = data.iconRuid or ""
+				self.tooltipIcon.Enable = iconRuid ~= ""
+				if iconRuid ~= "" then
+					self.tooltipIcon.SpriteGUIRendererComponent.ImageRUID = DataRef(iconRuid)
+				end
+			end
+			self.tooltipPanel.Enable = true
+			log("[UISkillHud] tooltip shown: " .. data.displayName)
+			return
+		elseif isvalid(self.tooltipPanel) and isvalid(self.tooltipText) then
+			self:ApplyTooltipLayout()
+			self.tooltipText.Text = msg
+			self.tooltipPanel.Enable = true
+			log("[UISkillHud] tooltip shown: " .. data.displayName)
+			return
+		end
+		_UIToastLogic:ShowMessage(msg)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateHoverTooltip()
+		-- Fallback for PC mouse hover: poll cursor position against explicit slot hit areas.
+		if not self.inStage or self.lastState == nil then
+			if self.hoverSlotIndex ~= 0 then
+				self.hoverSlotIndex = 0
+				self:HideSkillTooltip()
+			end
+			return
+		end
+		local nextSlot = self:FindHoveredSlotIndex()
+		if nextSlot == self.hoverSlotIndex then
+			return
+		end
+		self.hoverSlotIndex = nextSlot
+		if nextSlot > 0 then
+			self:ShowSkillTooltip(nextSlot)
+		else
+			self:HideSkillTooltip()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer FindHoveredSlotIndex()
+		-- Converts the current cursor position into each slot hit area's local coordinates.
+		local cursor = _InputService:GetCursorPosition()
+		for i = 1, #self.slots do
+			local slotEntity = self.slots[i]
+			if isvalid(slotEntity) and slotEntity.Enable then
+				local hitArea = slotEntity:GetChildByName("HoverHitArea", false)
+				if self:IsCursorInsideUi(hitArea, cursor) or self:IsCursorInsideUi(slotEntity, cursor) then
+					return i
+				end
+			end
+		end
+		return 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsCursorInsideUi(Entity entity, Vector2 cursor)
+		-- Uses a center-pivot check; HoverHitArea is authored with pivot (0.5, 0.5).
+		if not isvalid(entity) or not isvalid(entity.UITransformComponent) then
+			return false
+		end
+		local transform = entity.UITransformComponent
+		local localPos = _UILogic:ScreenToLocalUIPosition(cursor, transform)
+		local size = transform.RectSize
+		return localPos.x >= (-size.x * 0.5) and localPos.x <= (size.x * 0.5) and localPos.y >= (-size.y * 0.5) and localPos.y <= (size.y * 0.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideSkillTooltip()
+		-- Keeps the skill explanation card transient instead of becoming stale after pointer exit.
+		if isvalid(self.tooltipPanel) then
+			self.tooltipPanel.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyTooltipLayout()
+		-- Dedicated in-HUD tooltip avoids the shared toast layer being hidden behind other UI groups.
+		if isvalid(self.tooltipPanel) and isvalid(self.tooltipPanel.UITransformComponent) then
+			local panelTransform = self.tooltipPanel.UITransformComponent
+			panelTransform.AlignmentOption = AlignmentType.BottomLeft
+			panelTransform.AnchorsMin = Vector2(0, 0)
+			panelTransform.AnchorsMax = Vector2(0, 0)
+			panelTransform.Pivot = Vector2(0.5, 0.5)
+			panelTransform.RectSize = Vector2(560, 156)
+			panelTransform.anchoredPosition = Vector2(304, 278)
+		end
+		if isvalid(self.tooltipIcon) and isvalid(self.tooltipIcon.UITransformComponent) then
+			local iconTransform = self.tooltipIcon.UITransformComponent
+			iconTransform.AlignmentOption = AlignmentType.Left
+			iconTransform.AnchorsMin = Vector2(0, 0.5)
+			iconTransform.AnchorsMax = Vector2(0, 0.5)
+			iconTransform.Pivot = Vector2(0, 0.5)
+			iconTransform.RectSize = Vector2(54, 54)
+			iconTransform.anchoredPosition = Vector2(30, 36)
+		end
+		if isvalid(self.tooltipTitleText) then
+			self.tooltipTitleText.Overflow = OverflowType.Overflow
+			self.tooltipTitleText.BestFit = true
+			self.tooltipTitleText.MinSize = 13
+			self.tooltipTitleText.MaxSize = 18
+			self.tooltipTitleText.Alignment = TextAlignmentType.MiddleLeft
+			self.tooltipTitleText.UseConstraintX = true
+			self.tooltipTitleText.ConstraintX = 430
+			local titleEntity = self.tooltipTitleText.Entity
+			if isvalid(titleEntity) and isvalid(titleEntity.UITransformComponent) then
+				titleEntity.UITransformComponent.RectSize = Vector2(430, 28)
+				titleEntity.UITransformComponent.anchoredPosition = Vector2(94, 50)
+			end
+		end
+		if isvalid(self.tooltipDescText) then
+			self.tooltipDescText.Overflow = OverflowType.Overflow
+			self.tooltipDescText.BestFit = true
+			self.tooltipDescText.MinSize = 11
+			self.tooltipDescText.MaxSize = 15
+			self.tooltipDescText.Alignment = TextAlignmentType.MiddleLeft
+			self.tooltipDescText.UseConstraintX = true
+			self.tooltipDescText.ConstraintX = 430
+			self.tooltipDescText.UseConstraintY = true
+			self.tooltipDescText.ConstraintY = 64
+			local descEntity = self.tooltipDescText.Entity
+			if isvalid(descEntity) and isvalid(descEntity.UITransformComponent) then
+				descEntity.UITransformComponent.RectSize = Vector2(430, 64)
+				descEntity.UITransformComponent.anchoredPosition = Vector2(94, 4)
+			end
+		end
+		if isvalid(self.tooltipTargetText) then
+			self.tooltipTargetText.Overflow = OverflowType.Overflow
+			self.tooltipTargetText.BestFit = true
+			self.tooltipTargetText.MinSize = 10
+			self.tooltipTargetText.MaxSize = 13
+			self.tooltipTargetText.Alignment = TextAlignmentType.MiddleLeft
+			self.tooltipTargetText.UseConstraintX = true
+			self.tooltipTargetText.ConstraintX = 430
+			self.tooltipTargetText.UseConstraintY = true
+			self.tooltipTargetText.ConstraintY = 30
+			local targetEntity = self.tooltipTargetText.Entity
+			if isvalid(targetEntity) and isvalid(targetEntity.UITransformComponent) then
+				targetEntity.UITransformComponent.RectSize = Vector2(430, 30)
+				targetEntity.UITransformComponent.anchoredPosition = Vector2(94, -52)
+			end
+		end
+		if isvalid(self.tooltipText) then
+			self.tooltipText.Overflow = OverflowType.Overflow
+			self.tooltipText.BestFit = true
+			self.tooltipText.MinSize = 12
+			self.tooltipText.MaxSize = 16
+			self.tooltipText.Alignment = TextAlignmentType.MiddleLeft
+			self.tooltipText.UseConstraintX = true
+			self.tooltipText.ConstraintX = 500
+			self.tooltipText.UseConstraintY = true
+			self.tooltipText.ConstraintY = 112
+			local textEntity = self.tooltipText.Entity
+			if isvalid(textEntity) and isvalid(textEntity.UITransformComponent) then
+				textEntity.UITransformComponent.RectSize = Vector2(500, 112)
+				textEntity.UITransformComponent.anchoredPosition = Vector2(0, 0)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyRootLayout()
+		-- Anchors the owned-skill HUD in the lower-left safe area without touching the board.
+		if not isvalid(self.rootGroup) or not isvalid(self.rootGroup.UITransformComponent) then
+			return
+		end
+		local transform = self.rootGroup.UITransformComponent
+		transform.AlignmentOption = AlignmentType.BottomLeft
+		transform.AnchorsMin = Vector2(0, 0)
+		transform.AnchorsMax = Vector2(0, 0)
+		transform.Pivot = Vector2(0, 0)
+		transform.RectSize = Vector2(558, 184)
+		transform.anchoredPosition = Vector2(28, 28)
 	end
 
 	@ExecSpace("ClientOnly")
