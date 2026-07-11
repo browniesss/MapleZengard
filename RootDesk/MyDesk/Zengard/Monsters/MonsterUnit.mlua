@@ -15,6 +15,21 @@ script MonsterUnit extends Component
 	@Sync
 	property boolean IsBoss = false
 
+	@Sync
+	property string TypeId = ""
+
+	@Sync
+	property integer AnchorCol = 0
+
+	@Sync
+	property integer AnchorRow = 0
+
+	@Sync
+	property integer FootprintW = 1
+
+	@Sync
+	property integer FootprintH = 1
+
 	property boolean clientReady = false
 
 	property boolean hpBarAttached = false

@@ -51,6 +51,14 @@ script BoardLogic extends Logic
 		return Vector3(x, y, 0)
 	end
 
+	method Vector3 FootprintToWorld(integer col, integer row, integer footprintW, integer footprintH)
+		-- Anchor is the footprint's lower-left cell. Return the geometric center of all occupied cells.
+		local base = self:CellToWorld(col, row)
+		local x = base.x + (math.max(1, footprintW) - 1) * _BoardConfig.CELL_SIZE / 2
+		local y = base.y + (math.max(1, footprintH) - 1) * _BoardConfig.CELL_SIZE / 2
+		return Vector3(x, y, base.z)
+	end
+
 	method table WorldToCell(Vector3 pos)
 		-- Inverse of CellToWorld with rounding; nil outside the board.
 		local col = math.floor((pos.x - _BoardConfig.BOARD_CENTER_X) / _BoardConfig.CELL_SIZE + (_BoardConfig.GRID_COLS - 1) / 2 + 0.5)
@@ -74,44 +82,113 @@ script BoardLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method boolean TryOccupy(integer col, integer row, string occupantId, string kind)
-		-- Atomic claim of a cell; false when out of board or already taken.
-		if not self:IsInside(col, row) then
-			log_warning("[BoardLogic] TryOccupy out of board: " .. col .. "," .. row)
+		return self:TryOccupyFootprint(col, row, 1, 1, occupantId, kind)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanOccupyFootprint(integer col, integer row, integer footprintW, integer footprintH)
+		local width = math.max(1, footprintW)
+		local height = math.max(1, footprintH)
+		for c = col, col + width - 1 do
+			for r = row, row + height - 1 do
+				if not self:IsInside(c, r) or self.cells[self:CellKey(c, r)] ~= nil then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TryOccupyFootprint(integer col, integer row, integer footprintW, integer footprintH, string occupantId, string kind)
+		-- Validate the complete rectangle before writing anything so a failed 2x2 claim is atomic.
+		if not self:CanOccupyFootprint(col, row, footprintW, footprintH) then
 			return false
 		end
-		local key = self:CellKey(col, row)
-		if self.cells[key] ~= nil then
-			return false
+		local width = math.max(1, footprintW)
+		local height = math.max(1, footprintH)
+		for c = col, col + width - 1 do
+			for r = row, row + height - 1 do
+				self.cells[self:CellKey(c, r)] = { occupantId = occupantId, occupantKind = kind, anchorCol = col, anchorRow = row }
+			end
 		end
-		self.cells[key] = { occupantId = occupantId, occupantKind = kind }
 		return true
 	end
 
 	@ExecSpace("ServerOnly")
 	method void Release(integer col, integer row, string occupantId)
-		-- Id mismatch is silently ignored: a late kill event must not evict a newer occupant (spec §6-4).
-		local key = self:CellKey(col, row)
-		local cellData = self.cells[key]
-		if cellData == nil then
-			log_warning("[BoardLogic] Release on empty cell: " .. col .. "," .. row)
-			return
+		self:ReleaseFootprint(col, row, 1, 1, occupantId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReleaseFootprint(integer col, integer row, integer footprintW, integer footprintH, string occupantId)
+		-- Remove only cells still owned by this id; late events cannot evict a replacement occupant.
+		local width = math.max(1, footprintW)
+		local height = math.max(1, footprintH)
+		for c = col, col + width - 1 do
+			for r = row, row + height - 1 do
+				local key = self:CellKey(c, r)
+				local cellData = self.cells[key]
+				if cellData ~= nil and cellData.occupantId == occupantId then
+					self.cells[key] = nil
+				end
+			end
 		end
-		if cellData.occupantId ~= occupantId then
-			log_warning("[BoardLogic] Release id mismatch at " .. col .. "," .. row)
-			return
-		end
-		self.cells[key] = nil
 	end
 
 	@ExecSpace("ServerOnly")
 	method void ReplaceOccupant(integer col, integer row, string oldId, string newId)
-		-- Keeps occupancy ids consistent across entity swaps such as evolution (spec §6-7).
-		local cellData = self.cells[self:CellKey(col, row)]
-		if cellData == nil or cellData.occupantId ~= oldId then
-			log_warning("[BoardLogic] ReplaceOccupant mismatch at " .. col .. "," .. row)
-			return
+		self:ReplaceFootprintOccupant(col, row, 1, 1, oldId, newId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReplaceFootprintOccupant(integer col, integer row, integer footprintW, integer footprintH, string oldId, string newId)
+		local width = math.max(1, footprintW)
+		local height = math.max(1, footprintH)
+		for c = col, col + width - 1 do
+			for r = row, row + height - 1 do
+				local cellData = self.cells[self:CellKey(c, r)]
+				if cellData ~= nil and cellData.occupantId == oldId then
+					cellData.occupantId = newId
+				end
+			end
 		end
-		cellData.occupantId = newId
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetEmptyFootprintAnchors(integer footprintW, integer footprintH)
+		local result = {}
+		local width = math.max(1, footprintW)
+		local height = math.max(1, footprintH)
+		for col = 0, _BoardConfig.GRID_COLS - width do
+			for row = 0, _BoardConfig.GRID_ROWS - height do
+				if self:CanOccupyFootprint(col, row, width, height) then
+					table.insert(result, { col = col, row = row })
+				end
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetRandomEmptyFootprintAnchor(integer footprintW, integer footprintH)
+		local anchors = self:GetEmptyFootprintAnchors(footprintW, footprintH)
+		if #anchors == 0 then
+			return nil
+		end
+		return anchors[_UtilLogic:RandomIntegerRange(1, #anchors)]
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean HasEmptyFootprint(integer footprintW, integer footprintH)
+		for col = 0, _BoardConfig.GRID_COLS - math.max(1, footprintW) do
+			for row = 0, _BoardConfig.GRID_ROWS - math.max(1, footprintH) do
+				if self:CanOccupyFootprint(col, row, footprintW, footprintH) then
+					return true
+				end
+			end
+		end
+		return false
 	end
 
 	@ExecSpace("ServerOnly")
@@ -151,6 +228,22 @@ script BoardLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method table GetAdjacentEmptyFootprintAnchors(integer col, integer row, integer footprintW, integer footprintH)
+		local result = {}
+		local width = math.max(1, footprintW)
+		local height = math.max(1, footprintH)
+		local offsets = { { 0, height }, { 0, -height }, { -width, 0 }, { width, 0 } }
+		for _, offset in ipairs(offsets) do
+			local c = col + offset[1]
+			local r = row + offset[2]
+			if self:CanOccupyFootprint(c, r, footprintW, footprintH) then
+				table.insert(result, { col = c, row = r })
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
 	method table GetEmptyCellNearestCenter()
 		-- Boss spawn cell (MASTER_PLAN §1.2-3): nearest empty cell to board center, random among ties.
 		local centerCol = (_BoardConfig.GRID_COLS - 1) / 2
@@ -179,11 +272,39 @@ script BoardLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
+	method table GetEmptyFootprintAnchorNearestCenter(integer footprintW, integer footprintH)
+		local anchors = self:GetEmptyFootprintAnchors(footprintW, footprintH)
+		if #anchors == 0 then
+			return nil
+		end
+		local centerCol = (_BoardConfig.GRID_COLS - 1) / 2
+		local centerRow = (_BoardConfig.GRID_ROWS - 1) / 2
+		local bestDist = math.huge
+		local ties = {}
+		for _, anchor in ipairs(anchors) do
+			local footprintCenterCol = anchor.col + (math.max(1, footprintW) - 1) / 2
+			local footprintCenterRow = anchor.row + (math.max(1, footprintH) - 1) / 2
+			local dc = footprintCenterCol - centerCol
+			local dr = footprintCenterRow - centerRow
+			local dist = dc * dc + dr * dr
+			if dist < bestDist then
+				bestDist = dist
+				ties = { anchor }
+			elseif dist == bestDist then
+				table.insert(ties, anchor)
+			end
+		end
+		return ties[_UtilLogic:RandomIntegerRange(1, #ties)]
+	end
+
+	@ExecSpace("ServerOnly")
 	method integer GetOccupantCount(string kind)
 		-- Occupancy census by kind ("monster" | "player" | "boss" | "companion").
 		local count = 0
+		local seen = {}
 		for _, cellData in pairs(self.cells) do
-			if cellData.occupantKind == kind then
+			if cellData.occupantKind == kind and seen[cellData.occupantId] == nil then
+				seen[cellData.occupantId] = true
 				count += 1
 			end
 		end

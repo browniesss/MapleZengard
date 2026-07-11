@@ -55,7 +55,10 @@ script BossLogic extends Logic
 		if self.bossDefeated or self:IsBossAlive() then
 			return
 		end
-		local cell = _BoardLogic:GetEmptyCellNearestCenter()
+		local bossData = _MonsterBalance:GetTypeData(self.bossTypeId)
+		local footprintW = bossData ~= nil and (bossData.footprintW or 1) or 1
+		local footprintH = bossData ~= nil and (bossData.footprintH or 1) or 1
+		local cell = _BoardLogic:GetEmptyFootprintAnchorNearestCenter(footprintW, footprintH)
 		if cell == nil then
 			log("[BossLogic] boss spawn deferred: board full")
 			return
@@ -146,9 +149,12 @@ script BossLogic extends Logic
 			if data ~= nil and data.summonTypeId ~= nil then
 				summonTypeId = data.summonTypeId
 			end
-			local cells = _BoardLogic:GetRandomEmptyCells(1)
-			if cells ~= nil and #cells > 0 then
-				local spawnedId = _MonsterLogic:SpawnMonster(summonTypeId, cells[1].col, cells[1].row)
+			local summonData = _MonsterBalance:GetTypeData(summonTypeId)
+			local footprintW = summonData ~= nil and (summonData.footprintW or 1) or 1
+			local footprintH = summonData ~= nil and (summonData.footprintH or 1) or 1
+			local cell = _BoardLogic:GetRandomEmptyFootprintAnchor(footprintW, footprintH)
+			if cell ~= nil then
+				local spawnedId = _MonsterLogic:SpawnMonster(summonTypeId, cell.col, cell.row)
 				if spawnedId ~= "" then
 					pattern = "summon"
 				end

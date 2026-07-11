@@ -26,11 +26,9 @@ script BoardConfig extends Logic
 	-- (board order +100) is honored and the skill animation reads as a foreground overlay.
 	property boolean BOARD_FX_IGNORE_MAP_LAYER_CHECK = true
 
-	property number ENTITY_VISIBLE_HEIGHT = 0.72
+	property number MONSTER_CELL_FILL = 0.90
 
-	property number BOSS_VISIBLE_HEIGHT = 1.0
-
-	property number VERTICAL_OFFSET = -0.36
+	property number BOSS_CELL_FILL = 0.92
 
 	-- Player board-piece size. The avatar sprite has a lot of transparent vertical padding, so matching
 	-- its bounding box to a monster's 0.72u made the VISIBLE character far smaller than the mushrooms
@@ -39,7 +37,8 @@ script BoardConfig extends Logic
 	-- mushroom in the same row at both close-up and normal board zoom.
 	property number PLAYER_BOARD_SCALE = 0.75
 
-	-- Player-specific foot offset (the shared monster VERTICAL_OFFSET -0.36 assumes a 0.72u sprite). At
+	-- Player-specific foot offset. Monsters derive their pivot offset from footprint height; the avatar
+	-- keeps an independently tuned offset because its renderer contains substantial transparent padding. At
 	-- PLAYER_BOARD_SCALE the avatar's visible character is taller, so it is dropped slightly more to keep
 	-- the body centered in the cell and the feet aligned with the monsters in the same row.
 	property number PLAYER_VERTICAL_OFFSET = -0.40
@@ -53,26 +52,36 @@ script BoardConfig extends Logic
 		return self.ORDER_IN_LAYER_BASE + (self.GRID_ROWS - 1 - row)
 	end
 
-	method Vector3 ApplyCellFitOffset(Vector3 cellWorldPos)
-		-- Centers a bottom-pivot piece vertically inside the cell. MSW mob/avatar sprites pivot at
-		-- the feet (ny=0), so Position is the foot point; placing the feet at the cell center leaves
-		-- the body overhanging the top edge. VERTICAL_OFFSET (= -visibleHeight/2) drops the feet so
-		-- the visible bounds sit centered on the cell. X stays on the cell center (no horizontal shift).
-		return Vector3(cellWorldPos.x, cellWorldPos.y + self.VERTICAL_OFFSET, cellWorldPos.z)
+	method number GetFootprintFill(boolean isBoss)
+		if isBoss then
+			return self.BOSS_CELL_FILL
+		end
+		return self.MONSTER_CELL_FILL
 	end
 
-	method number ComputeFitScale(number nativeHeightUnits, boolean isBoss)
-		-- Single source for board piece sizing: scale a sprite so its visible height fills the
-		-- target band of the 0.8u cell (regular ~75%, boss intentionally larger). Returns the
-		-- uniform Transform scale; nativeHeightUnits = sprite pixel height / PixelPerUnit.
-		if nativeHeightUnits <= 0 then
+	method number GetFootprintTargetWidth(integer footprintW, boolean isBoss)
+		return math.max(1, footprintW) * self.CELL_SIZE * self:GetFootprintFill(isBoss)
+	end
+
+	method number GetFootprintTargetHeight(integer footprintH, boolean isBoss)
+		return math.max(1, footprintH) * self.CELL_SIZE * self:GetFootprintFill(isBoss)
+	end
+
+	method Vector3 ApplyFootprintFitOffset(Vector3 footprintCenter, integer footprintH, boolean isBoss)
+		-- Monster sprites use a feet pivot. Drop the pivot by half of the fitted visible height so
+		-- the rendered body is centered inside its complete 1x1 or 2x2 footprint.
+		local targetHeight = self:GetFootprintTargetHeight(footprintH, isBoss)
+		return Vector3(footprintCenter.x, footprintCenter.y - targetHeight / 2, footprintCenter.z)
+	end
+
+	method number ComputeFitScale(number nativeWidthUnits, number nativeHeightUnits, integer footprintW, integer footprintH, boolean isBoss)
+		-- Fit both axes to the occupied cells while preserving the source sprite's aspect ratio.
+		if nativeWidthUnits <= 0 or nativeHeightUnits <= 0 then
 			return 1
 		end
-		local target = self.ENTITY_VISIBLE_HEIGHT
-		if isBoss then
-			target = self.BOSS_VISIBLE_HEIGHT
-		end
-		return target / nativeHeightUnits
+		local widthScale = self:GetFootprintTargetWidth(footprintW, isBoss) / nativeWidthUnits
+		local heightScale = self:GetFootprintTargetHeight(footprintH, isBoss) / nativeHeightUnits
+		return math.min(widthScale, heightScale)
 	end
 
 end

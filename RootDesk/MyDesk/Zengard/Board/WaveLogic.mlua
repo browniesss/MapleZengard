@@ -206,14 +206,21 @@ script WaveLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method integer SpawnMonsters(integer count)
-		-- Cell draw + weighted type draw only; spawn authority belongs to MonsterLogic (C-3).
+		-- Draw only from monster types whose complete footprint currently fits on the board.
 		local cfg = self.stageConfig
-		local emptyCells = _BoardLogic:GetRandomEmptyCells(count)
 		local spawned = 0
-		for _, cell in ipairs(emptyCells) do
-			local typeId = self:PickMonsterType(cfg.spawnWeights)
+		for i = 1, count do
+			local typeId = self:PickSpawnableMonsterType(cfg.spawnWeights)
 			if typeId == "" then
-				log_error("[WaveLogic] no spawnable monster type for stage " .. self.currentStageId)
+				log_warning("[WaveLogic] no footprint available for remaining stage monsters: " .. self.currentStageId)
+				break
+			end
+			local data = _MonsterBalance:GetTypeData(typeId)
+			local footprintW = data ~= nil and (data.footprintW or 1) or 1
+			local footprintH = data ~= nil and (data.footprintH or 1) or 1
+			local cell = _BoardLogic:GetRandomEmptyFootprintAnchor(footprintW, footprintH)
+			if cell == nil then
+				log_warning("[WaveLogic] footprint disappeared before spawn: " .. typeId)
 				break
 			end
 			local monsterId = _MonsterLogic:SpawnMonster(typeId, cell.col, cell.row)
@@ -247,6 +254,19 @@ script WaveLogic extends Logic
 			end
 		end
 		return ""
+	end
+
+	method string PickSpawnableMonsterType(table spawnWeights)
+		local available = {}
+		for typeId, weight in pairs(spawnWeights) do
+			local data = _MonsterBalance:GetTypeData(typeId)
+			local footprintW = data ~= nil and (data.footprintW or 1) or 1
+			local footprintH = data ~= nil and (data.footprintH or 1) or 1
+			if weight > 0 and _BoardLogic:HasEmptyFootprint(footprintW, footprintH) then
+				available[typeId] = weight
+			end
+		end
+		return self:PickMonsterType(available)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -370,20 +390,29 @@ script WaveLogic extends Logic
 			return
 		end
 		for _, monster in ipairs(monsters) do
-			_BoardLogic:Release(monster.col, monster.row, monster.monsterId)
+			_BoardLogic:ReleaseFootprint(monster.col, monster.row, monster.footprintW, monster.footprintH, monster.monsterId)
 		end
-		local emptyCells = _BoardLogic:GetRandomEmptyCells(#monsters)
-		for i, monster in ipairs(monsters) do
+		-- Place large bodies first so 1x1 units cannot fragment every valid 2x2 region.
+		table.sort(monsters, function(a, b)
+			local areaA = a.footprintW * a.footprintH
+			local areaB = b.footprintW * b.footprintH
+			if areaA == areaB then
+				return a.monsterId < b.monsterId
+			end
+			return areaA > areaB
+		end)
+		for _, monster in ipairs(monsters) do
 			local occupantKind = monster.isBoss and "boss" or "monster"
-			local cell = emptyCells[i]
+			local cell = _BoardLogic:GetRandomEmptyFootprintAnchor(monster.footprintW, monster.footprintH)
 			if cell == nil then
-				-- We released exactly #monsters cells, so this should not happen; keep the old cell.
-				_BoardLogic:TryOccupy(monster.col, monster.row, monster.monsterId, occupantKind)
+				-- The prior layout was valid. Restore the original anchor if random repacking cannot fit it.
+				if not _BoardLogic:TryOccupyFootprint(monster.col, monster.row, monster.footprintW, monster.footprintH, monster.monsterId, occupantKind) then
+					log_error("[WaveLogic] monster footprint restore failed: " .. monster.monsterId)
+				end
 			else
-				-- MonsterLogic owns the registry + entity reference, so it relocates both
-				-- (the monsterId is an internal key, not an entity handle resolvable by EntityService).
-				_BoardLogic:TryOccupy(cell.col, cell.row, monster.monsterId, occupantKind)
-				_MonsterLogic:RelocateMonster(monster.monsterId, cell.col, cell.row)
+				if _BoardLogic:TryOccupyFootprint(cell.col, cell.row, monster.footprintW, monster.footprintH, monster.monsterId, occupantKind) then
+					_MonsterLogic:RelocateMonster(monster.monsterId, cell.col, cell.row)
+				end
 			end
 		end
 		log("[WaveLogic] monsters reshuffled: " .. #monsters)

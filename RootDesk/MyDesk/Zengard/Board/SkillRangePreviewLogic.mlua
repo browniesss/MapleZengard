@@ -278,7 +278,8 @@ script SkillRangePreviewLogic extends Logic
 			local m = self:FindMonsterCellAt(cell.col, cell.row)
 			if m ~= nil and seen[m.monsterId] == nil then
 				seen[m.monsterId] = true
-				table.insert(found, m)
+				-- Highlight the resolved attack cell that intersects the footprint, not only its anchor.
+				table.insert(found, { col = cell.col, row = cell.row, monsterId = m.monsterId, footprintW = m.footprintW, footprintH = m.footprintH })
 				if stopAtFirst then
 					break
 				end
@@ -291,7 +292,9 @@ script SkillRangePreviewLogic extends Logic
 	method table FindMonsterCellAt(integer col, integer row)
 		local alive = self:GetAliveMonsterCells()
 		for _, m in ipairs(alive) do
-			if m.col == col and m.row == row then
+			local insideX = col >= m.col and col < m.col + m.footprintW
+			local insideY = row >= m.row and row < m.row + m.footprintH
+			if insideX and insideY then
 				return m
 			end
 		end
@@ -307,16 +310,21 @@ script SkillRangePreviewLogic extends Logic
 		local units = player.CurrentMap:GetChildComponentsByTypeName("script.MonsterUnit", true)
 		local found = {}
 		for _, comp in ipairs(units) do
-			---@type MonsterUnit
+			---@type any
 			local unit = comp
 			if isvalid(unit) and unit.IsDead ~= true and isvalid(unit.Entity) then
-				local cell = _BoardLogic:WorldToCell(unit.Entity.TransformComponent.WorldPosition)
-				if cell ~= nil then
+				if unit.TypeId ~= "" then
 					local monsterId = string.match(unit.Entity.Name, "(mon_%d+)$")
 					if monsterId == nil then
 						monsterId = unit.Entity.Name
 					end
-					table.insert(found, { col = cell.col, row = cell.row, monsterId = monsterId })
+					table.insert(found, {
+						col = unit.AnchorCol,
+						row = unit.AnchorRow,
+						monsterId = monsterId,
+						footprintW = math.max(1, unit.FootprintW),
+						footprintH = math.max(1, unit.FootprintH),
+					})
 				end
 			end
 		end
