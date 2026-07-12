@@ -74,10 +74,16 @@ script BoardLogic extends Logic
 		return col >= 0 and col < _BoardConfig.GRID_COLS and row >= 0 and row < _BoardConfig.GRID_ROWS
 	end
 
+	method boolean IsCellEmpty(integer col, integer row)
+		-- A cell is empty when it holds no occupancy members (exclusive or cluster).
+		local cell = self.cells[self:CellKey(col, row)]
+		return cell == nil or #cell.members == 0
+	end
+
 	@ExecSpace("ServerOnly")
 	method boolean IsOccupied(integer col, integer row)
 		-- Server-authoritative occupancy query.
-		return self.cells[self:CellKey(col, row)] ~= nil
+		return not self:IsCellEmpty(col, row)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -91,7 +97,7 @@ script BoardLogic extends Logic
 		local height = math.max(1, footprintH)
 		for c = col, col + width - 1 do
 			for r = row, row + height - 1 do
-				if not self:IsInside(c, r) or self.cells[self:CellKey(c, r)] ~= nil then
+				if not self:IsInside(c, r) or not self:IsCellEmpty(c, r) then
 					return false
 				end
 			end
@@ -109,10 +115,65 @@ script BoardLogic extends Logic
 		local height = math.max(1, footprintH)
 		for c = col, col + width - 1 do
 			for r = row, row + height - 1 do
-				self.cells[self:CellKey(c, r)] = { occupantId = occupantId, occupantKind = kind, anchorCol = col, anchorRow = row }
+				self.cells[self:CellKey(c, r)] = { clusterCap = 1, clusterGroup = "", members = { { occupantId = occupantId, occupantKind = kind, anchorCol = col, anchorRow = row } } }
 			end
 		end
 		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanPlaceCluster(integer col, integer row, string clusterGroup, integer clusterCap)
+		-- A cluster member (always 1x1) fits when its cell is empty, or already holds the same
+		-- cluster group below capacity. Mixing a cluster into an exclusive/other-group cell is rejected.
+		if not self:IsInside(col, row) then
+			return false
+		end
+		local cell = self.cells[self:CellKey(col, row)]
+		if cell == nil or #cell.members == 0 then
+			return true
+		end
+		return cell.clusterCap > 1 and cell.clusterGroup == clusterGroup and #cell.members < cell.clusterCap
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TryOccupyCluster(integer col, integer row, string occupantId, string kind, string clusterGroup, integer clusterCap)
+		-- Adds one cluster member to a 1x1 cell shared by up to clusterCap same-group units.
+		if not self:CanPlaceCluster(col, row, clusterGroup, clusterCap) then
+			return false
+		end
+		local key = self:CellKey(col, row)
+		local cell = self.cells[key]
+		if cell == nil or #cell.members == 0 then
+			cell = { clusterCap = clusterCap, clusterGroup = clusterGroup, members = {} }
+			self.cells[key] = cell
+		end
+		-- Assign the lowest free sub-grid slot so a refill after a sibling's death takes the vacated
+		-- slot instead of colliding with a survivor that still holds its original slot.
+		local usedSlots = {}
+		for _, mem in ipairs(cell.members) do
+			usedSlots[mem.slot] = true
+		end
+		local slot = 0
+		while slot < clusterCap and usedSlots[slot] do
+			slot = slot + 1
+		end
+		table.insert(cell.members, { occupantId = occupantId, occupantKind = kind, anchorCol = col, anchorRow = row, slot = slot })
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetClusterMemberIndex(integer col, integer row, string occupantId)
+		-- Stable 0-based sub-grid slot assigned to occupantId (survives a sibling's death); -1 when absent.
+		local cell = self.cells[self:CellKey(col, row)]
+		if cell == nil then
+			return -1
+		end
+		for _, mem in ipairs(cell.members) do
+			if mem.occupantId == occupantId then
+				return mem.slot
+			end
+		end
+		return -1
 	end
 
 	@ExecSpace("ServerOnly")
@@ -129,8 +190,15 @@ script BoardLogic extends Logic
 			for r = row, row + height - 1 do
 				local key = self:CellKey(c, r)
 				local cellData = self.cells[key]
-				if cellData ~= nil and cellData.occupantId == occupantId then
-					self.cells[key] = nil
+				if cellData ~= nil then
+					for i = #cellData.members, 1, -1 do
+						if cellData.members[i].occupantId == occupantId then
+							table.remove(cellData.members, i)
+						end
+					end
+					if #cellData.members == 0 then
+						self.cells[key] = nil
+					end
 				end
 			end
 		end
@@ -148,8 +216,12 @@ script BoardLogic extends Logic
 		for c = col, col + width - 1 do
 			for r = row, row + height - 1 do
 				local cellData = self.cells[self:CellKey(c, r)]
-				if cellData ~= nil and cellData.occupantId == oldId then
-					cellData.occupantId = newId
+				if cellData ~= nil then
+					for _, mem in ipairs(cellData.members) do
+						if mem.occupantId == oldId then
+							mem.occupantId = newId
+						end
+					end
 				end
 			end
 		end
@@ -197,7 +269,7 @@ script BoardLogic extends Logic
 		local empty = {}
 		for col = 0, _BoardConfig.GRID_COLS - 1 do
 			for row = 0, _BoardConfig.GRID_ROWS - 1 do
-				if self.cells[self:CellKey(col, row)] == nil then
+				if self:IsCellEmpty(col, row) then
 					table.insert(empty, { col = col, row = row })
 				end
 			end
@@ -220,7 +292,7 @@ script BoardLogic extends Logic
 		for _, offset in ipairs(offsets) do
 			local c = col + offset[1]
 			local r = row + offset[2]
-			if self:IsInside(c, r) and self.cells[self:CellKey(c, r)] == nil then
+			if self:IsInside(c, r) and self:IsCellEmpty(c, r) then
 				table.insert(result, { col = c, row = r })
 			end
 		end
@@ -252,7 +324,7 @@ script BoardLogic extends Logic
 		local ties = {}
 		for col = 0, _BoardConfig.GRID_COLS - 1 do
 			for row = 0, _BoardConfig.GRID_ROWS - 1 do
-				if self.cells[self:CellKey(col, row)] == nil then
+				if self:IsCellEmpty(col, row) then
 					local dc = col - centerCol
 					local dr = row - centerRow
 					local dist = dc * dc + dr * dr
@@ -303,12 +375,52 @@ script BoardLogic extends Logic
 		local count = 0
 		local seen = {}
 		for _, cellData in pairs(self.cells) do
-			if cellData.occupantKind == kind and seen[cellData.occupantId] == nil then
-				seen[cellData.occupantId] = true
-				count += 1
+			for _, mem in ipairs(cellData.members) do
+				if mem.occupantKind == kind and seen[mem.occupantId] == nil then
+					seen[mem.occupantId] = true
+					count += 1
+				end
 			end
 		end
 		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean HasClusterRoom(string clusterGroup, integer clusterCap)
+		-- True when any cell can accept another cluster member: an empty cell or a matching partial cluster.
+		for col = 0, _BoardConfig.GRID_COLS - 1 do
+			for row = 0, _BoardConfig.GRID_ROWS - 1 do
+				if self:CanPlaceCluster(col, row, clusterGroup, clusterCap) then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetClusterSpawnAnchor(string clusterGroup, integer clusterCap)
+		-- Prefer topping up an existing partial cluster of the same group (keeps snails bunched),
+		-- else fall back to a random empty cell. nil when the board is full.
+		local partial = {}
+		local empty = {}
+		for col = 0, _BoardConfig.GRID_COLS - 1 do
+			for row = 0, _BoardConfig.GRID_ROWS - 1 do
+				local cell = self.cells[self:CellKey(col, row)]
+				if cell == nil or #cell.members == 0 then
+					table.insert(empty, { col = col, row = row })
+				elseif cell.clusterCap > 1 and cell.clusterGroup == clusterGroup and #cell.members < cell.clusterCap then
+					table.insert(partial, { col = col, row = row })
+				end
+			end
+		end
+		if #partial > 0 then
+			return partial[_UtilLogic:RandomIntegerRange(1, #partial)]
+		end
+		if #empty > 0 then
+			return empty[_UtilLogic:RandomIntegerRange(1, #empty)]
+		end
+		return nil
 	end
 
 	@ExecSpace("ServerOnly")

@@ -600,16 +600,23 @@ script CombatLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method table CollectMonstersInCells(table cells, boolean stopAtFirst)
 		-- Cell order is preserved; the seen-set dedupes a monster occupying multiple resolved cells (E-6).
+		-- Every monster in a cell is collected, so a cluster cell (several small monsters) takes the hit
+		-- as a whole. stopAtFirst (non-pierce LINE) stops after the first occupied cell but still hits all
+		-- of that cell's occupants.
 		local found = {}
 		local seen = {}
 		for _, c in ipairs(cells) do
-			local m = _MonsterLogic:GetMonsterAt(c.col, c.row)
-			if m ~= nil and seen[m.monsterId] == nil then
-				seen[m.monsterId] = true
-				table.insert(found, m.monsterId)
-				if stopAtFirst then
-					break
+			local cellMonsters = _MonsterLogic:GetMonstersAt(c.col, c.row)
+			local hitAny = false
+			for _, m in ipairs(cellMonsters) do
+				if seen[m.monsterId] == nil then
+					seen[m.monsterId] = true
+					table.insert(found, m.monsterId)
+					hitAny = true
 				end
+			end
+			if stopAtFirst and hitAny then
+				break
 			end
 		end
 		return found

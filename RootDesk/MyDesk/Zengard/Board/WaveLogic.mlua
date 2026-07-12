@@ -218,7 +218,13 @@ script WaveLogic extends Logic
 			local data = _MonsterBalance:GetTypeData(typeId)
 			local footprintW = data ~= nil and (data.footprintW or 1) or 1
 			local footprintH = data ~= nil and (data.footprintH or 1) or 1
-			local cell = _BoardLogic:GetRandomEmptyFootprintAnchor(footprintW, footprintH)
+			local clusterCount = data ~= nil and (data.clusterCount or 1) or 1
+			local cell = nil
+			if clusterCount > 1 then
+				cell = _BoardLogic:GetClusterSpawnAnchor(typeId, clusterCount)
+			else
+				cell = _BoardLogic:GetRandomEmptyFootprintAnchor(footprintW, footprintH)
+			end
 			if cell == nil then
 				log_warning("[WaveLogic] footprint disappeared before spawn: " .. typeId)
 				break
@@ -262,7 +268,14 @@ script WaveLogic extends Logic
 			local data = _MonsterBalance:GetTypeData(typeId)
 			local footprintW = data ~= nil and (data.footprintW or 1) or 1
 			local footprintH = data ~= nil and (data.footprintH or 1) or 1
-			if weight > 0 and _BoardLogic:HasEmptyFootprint(footprintW, footprintH) then
+			local clusterCount = data ~= nil and (data.clusterCount or 1) or 1
+			local hasRoom = false
+			if clusterCount > 1 then
+				hasRoom = _BoardLogic:HasClusterRoom(typeId, clusterCount)
+			else
+				hasRoom = _BoardLogic:HasEmptyFootprint(footprintW, footprintH)
+			end
+			if weight > 0 and hasRoom then
 				available[typeId] = weight
 			end
 		end
@@ -385,8 +398,22 @@ script WaveLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void ReshuffleMonsters()
 		-- Release-all-then-redraw avoids the pairwise swap deadlock (spec §5.5).
-		local monsters = _MonsterLogic:GetAliveMonsters()
-		if monsters == nil or #monsters == 0 then
+		-- Cluster monsters (several small units sharing one cell with fixed sub-grid slots) are left in
+		-- place: re-placing them as exclusive 1x1 units would scatter the group and strand their in-cell
+		-- offset/scale. Their cells stay occupied so exclusive re-placement routes around them.
+		local allMonsters = _MonsterLogic:GetAliveMonsters()
+		if allMonsters == nil or #allMonsters == 0 then
+			return
+		end
+		local monsters = {}
+		for _, monster in ipairs(allMonsters) do
+			local data = _MonsterBalance:GetTypeData(monster.typeId)
+			local clusterCount = data ~= nil and (data.clusterCount or 1) or 1
+			if clusterCount <= 1 then
+				table.insert(monsters, monster)
+			end
+		end
+		if #monsters == 0 then
 			return
 		end
 		for _, monster in ipairs(monsters) do

@@ -74,6 +74,59 @@ script BoardConfig extends Logic
 		return Vector3(footprintCenter.x, footprintCenter.y - targetHeight / 2, footprintCenter.z)
 	end
 
+	method table GetClusterSlot(integer index, integer count)
+		-- Auto sub-grid placement for `count` small monsters sharing one 1x1 cell.
+		-- Returns world-space offsets (dx,dy from the cell center), a per-member shrink `scale`,
+		-- and `orderBonus` so front (lower) members draw over back ones. `index` is 0-based.
+		-- Layouts: 1=center, 2=side-by-side, 3=triangle (apex up), 4=2x2, 5+=square grid.
+		if count <= 1 then
+			return { dx = 0, dy = 0, scale = 1, orderBonus = 0 }
+		end
+		local fx = 0
+		local fy = 0
+		local scale = 0.7
+		if count == 2 then
+			local xs = { -0.22, 0.22 }
+			fx = xs[index % 2 + 1]
+			fy = 0
+			scale = 0.78
+		elseif count == 3 then
+			local pts = { { -0.22, -0.14 }, { 0.22, -0.14 }, { 0.0, 0.18 } }
+			local p = pts[index % 3 + 1]
+			fx = p[1]
+			fy = p[2]
+			scale = 0.62
+		elseif count == 4 then
+			local pts = { { -0.20, -0.16 }, { 0.20, -0.16 }, { -0.20, 0.16 }, { 0.20, 0.16 } }
+			local p = pts[index % 4 + 1]
+			fx = p[1]
+			fy = p[2]
+			scale = 0.60
+		else
+			-- General square grid, centered, top-to-bottom so lower rows read as front.
+			local cols = math.ceil(math.sqrt(count))
+			local rows = math.ceil(count / cols)
+			local col = index % cols
+			local rowFromTop = math.floor(index / cols)
+			local colSpread = 0.6
+			local rowSpread = 0.5
+			if cols > 1 then
+				fx = (col / (cols - 1) - 0.5) * colSpread
+			end
+			if rows > 1 then
+				fy = (0.5 - rowFromTop / (rows - 1)) * rowSpread
+			end
+			scale = math.min(0.62, 1.3 / cols)
+		end
+		local orderBonus = 0
+		if fy < 0 then
+			orderBonus = 1
+		elseif fy > 0 then
+			orderBonus = -1
+		end
+		return { dx = fx * self.CELL_SIZE, dy = fy * self.CELL_SIZE, scale = scale, orderBonus = orderBonus }
+	end
+
 	method number ComputeFitScale(number nativeWidthUnits, number nativeHeightUnits, integer footprintW, integer footprintH, boolean isBoss)
 		-- Fit both axes to the occupied cells while preserving the source sprite's aspect ratio.
 		if nativeWidthUnits <= 0 or nativeHeightUnits <= 0 then

@@ -82,11 +82,12 @@ script MonsterLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void SetupShadow(Entity entity, number bodyScale, integer footprintW)
+	method void SetupShadow(Entity entity, number bodyScale, integer footprintW, number sizeMul)
 		-- Flat neutral drop shadow so the piece reads as separated from the board (no green tint, alpha 0.28).
 		-- The shadow child inherits the body fit scale, which varies per monster; counter-scale it by 1/bodyScale
 		-- so its world footprint stays constant (~0.45u wide x 0.15u tall) regardless of monster size. The white
 		-- circle sprite is 1.0u native, so world size = childLocalScale (after the parent-scale cancels out).
+		-- sizeMul (<=1) shrinks the shadow for clustered members so it tracks the smaller rendered body.
 		if bodyScale <= 0 then
 			return
 		end
@@ -100,8 +101,12 @@ script MonsterLogic extends Logic
 		end
 		local t = shadow.TransformComponent
 		if isvalid(t) then
-			local shadowWidth = math.min(1.10, 0.45 * math.max(1, footprintW))
-			local shadowHeight = math.min(0.24, 0.15 + 0.06 * (math.max(1, footprintW) - 1))
+			local mul = sizeMul
+			if mul <= 0 then
+				mul = 1
+			end
+			local shadowWidth = math.min(1.10, 0.45 * math.max(1, footprintW)) * mul
+			local shadowHeight = math.min(0.24, 0.15 + 0.06 * (math.max(1, footprintW) - 1)) * mul
 			t.Scale = Vector3(shadowWidth / bodyScale, shadowHeight / bodyScale, 1)
 			-- Counter-scale the local offset too so the shadow sits a constant ~0.02u under the feet in
 			-- world space (child-local Y is multiplied by the parent body scale). z just below the body.
@@ -166,7 +171,15 @@ script MonsterLogic extends Logic
 		end
 		local footprintW = data.footprintW or 1
 		local footprintH = data.footprintH or 1
-		if not _BoardLogic:TryOccupyFootprint(col, row, footprintW, footprintH, monsterId, kind) then
+		local clusterCount = data.clusterCount or 1
+		local occupied = false
+		if clusterCount > 1 then
+			-- Small monsters share one cell: a matching cluster group stacks up to clusterCount members.
+			occupied = _BoardLogic:TryOccupyCluster(col, row, monsterId, kind, typeId, clusterCount)
+		else
+			occupied = _BoardLogic:TryOccupyFootprint(col, row, footprintW, footprintH, monsterId, kind)
+		end
+		if not occupied then
 			log_warning("[MonsterLogic] spawn skipped: footprint unavailable (" .. col .. "," .. row .. ") size=" .. footprintW .. "x" .. footprintH .. " typeId=" .. typeId)
 			return ""
 		end
@@ -195,11 +208,26 @@ script MonsterLogic extends Logic
 			log_error("[MonsterLogic] spawn failed: SpawnByModelId nil for modelId=" .. data.modelId)
 			return false
 		end
+		-- Cluster members (small monsters sharing one cell) get an auto sub-grid slot: an in-cell
+		-- offset, a per-member shrink, and a depth bump so front members overlap the back ones.
+		local clusterCount = data.clusterCount or 1
+		local clusterSlot = nil
+		if clusterCount > 1 then
+			local slotIndex = _BoardLogic:GetClusterMemberIndex(col, row, monsterId)
+			if slotIndex < 0 then
+				slotIndex = 0
+			end
+			clusterSlot = _BoardConfig:GetClusterSlot(slotIndex, clusterCount)
+		end
 		-- Pseudo-depth: lower rows render in front (single source: BoardConfig, MASTER_PLAN §5.1).
 		local renderer = entity.SpriteRendererComponent
 		if isvalid(renderer) then
 			renderer.SortingLayer = _BoardConfig.BOARD_SORTING_LAYER
-			renderer.OrderInLayer = _BoardConfig:GetOrderInLayer(row)
+			local order = _BoardConfig:GetOrderInLayer(row)
+			if clusterSlot ~= nil then
+				order = order + clusterSlot.orderBonus
+			end
+			renderer.OrderInLayer = order
 		end
 		-- Footprint board fit preserves aspect ratio and uses the full assigned cell rectangle.
 		-- data.scale (>0) is an explicit override factor
@@ -207,6 +235,11 @@ script MonsterLogic extends Logic
 		local fitScale = self:ResolveFitScale(data, entity)
 		if data.scale > 0 then
 			fitScale = fitScale * data.scale
+		end
+		local shadowSizeMul = 1
+		if clusterSlot ~= nil then
+			fitScale = fitScale * clusterSlot.scale
+			shadowSizeMul = clusterSlot.scale
 		end
 		entity.TransformComponent.Scale = Vector3(fitScale, fitScale, 1)
 		-- Position by the rendered bounds center, not by the sprite pivot or nominal cell height.
@@ -218,8 +251,10 @@ script MonsterLogic extends Logic
 			centerOffsetX = (metrics.width / 2 - metrics.pivotX) * fitScale
 			centerOffsetY = (metrics.height / 2 - metrics.pivotY) * fitScale
 		end
-		entity.TransformComponent.Position = Vector3(footprintCenter.x - centerOffsetX, footprintCenter.y - centerOffsetY, footprintCenter.z)
-		self:SetupShadow(entity, fitScale, footprintW)
+		local clusterDx = clusterSlot ~= nil and clusterSlot.dx or 0
+		local clusterDy = clusterSlot ~= nil and clusterSlot.dy or 0
+		entity.TransformComponent.Position = Vector3(footprintCenter.x - centerOffsetX + clusterDx, footprintCenter.y - centerOffsetY + clusterDy, footprintCenter.z)
+		self:SetupShadow(entity, fitScale, footprintW, shadowSizeMul)
 		---@type MonsterUnit
 		local unit = entity:GetComponent("script.MonsterUnit")
 		if unit ~= nil then
@@ -249,6 +284,8 @@ script MonsterLogic extends Logic
 			footprintH = footprintH,
 			centerOffsetX = centerOffsetX,
 			centerOffsetY = centerOffsetY,
+			clusterDx = clusterDx,
+			clusterDy = clusterDy,
 			hp = data.maxHp,
 			maxHp = data.maxHp,
 			exp = data.exp,
@@ -275,7 +312,7 @@ script MonsterLogic extends Logic
 		m.row = row
 		if isvalid(m.entity) then
 			local center = _BoardLogic:FootprintToWorld(col, row, m.footprintW, m.footprintH)
-			m.entity.TransformComponent.Position = Vector3(center.x - (m.centerOffsetX or 0), center.y - (m.centerOffsetY or 0), center.z)
+			m.entity.TransformComponent.Position = Vector3(center.x - (m.centerOffsetX or 0) + (m.clusterDx or 0), center.y - (m.centerOffsetY or 0) + (m.clusterDy or 0), center.z)
 			local renderer = m.entity.SpriteRendererComponent
 			if isvalid(renderer) then
 				renderer.OrderInLayer = _BoardConfig:GetOrderInLayer(row)
@@ -499,19 +536,20 @@ script MonsterLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method table GetMonsterAt(integer col, integer row)
-		-- C-16: registry owner answers cell queries. nil when no living monster occupies the cell.
+	method table GetMonstersAt(integer col, integer row)
+		-- Every living monster occupying the cell (cluster cells hold several). Cell attacks hit them all.
 		self:EnsureBuilt()
+		local list = {}
 		for _, m in pairs(self.registry) do
 			local footprintW = m.footprintW or 1
 			local footprintH = m.footprintH or 1
 			local insideX = col >= m.col and col < m.col + footprintW
 			local insideY = row >= m.row and row < m.row + footprintH
 			if not m.isDead and insideX and insideY then
-				return self:ToInfo(m)
+				table.insert(list, self:ToInfo(m))
 			end
 		end
-		return nil
+		return list
 	end
 
 	@ExecSpace("ServerOnly")
@@ -606,7 +644,7 @@ script MonsterLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method table ToInfo(table m)
-		-- Read-only snapshot exposed to other systems (GetMonsterAt schema, §4.3).
+		-- Read-only snapshot exposed to other systems (GetMonstersAt schema, §4.3).
 		return {
 			monsterId = m.monsterId,
 			typeId = m.typeId,

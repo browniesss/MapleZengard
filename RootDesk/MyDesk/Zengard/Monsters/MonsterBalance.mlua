@@ -65,6 +65,9 @@ script MonsterBalance extends Logic
 				-- The source sprite is 0.37x0.26u. The generic 1x1 fit scales it by 1.946,
 				-- so 0.514 cancels that enlargement and keeps the snail at native world size.
 				scale = 0.514,
+				-- Small monsters pack several into one cell (auto sub-grid). Each stays an
+				-- independent unit (own HP/kill); a cell attack hits every member (셀 전체 타격).
+				clusterCount = 3,
 				drops = { { itemId = "meso", chance = 0.20, count = 5 } },
 			},
 			orangemushroom = {
